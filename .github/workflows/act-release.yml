@@ -130,6 +130,26 @@ jobs:
           echo "WORK_DIR_OS=${{ env.WORK_DIR_OS }}"
           echo GITHUB_WORKSPACE=$GITHUB_WORKSPACE
 
+      - name: Prepare Publish Release
+        continue-on-error: true
+        uses: deep-soft/action-gh-release@v2.1
+        with:
+          draft: ${{ env.DRAFT }}
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            ${{ env.WORK_DIR_OS }}/_version_.txt
+
+      - name: Prepare Release Publish Archive ALL
+        if:  ${{ inputs.archive_ALL}}
+        continue-on-error: true
+        uses: deep-soft/action-gh-release@v2.1
+        with:
+          draft: true
+          tag_name: ${{ env.TAG_VERSION }}${{ env.TAG_BUILD }}-ALL
+          filelist: ''
+          files: |
+              ${{ env.WORK_DIR_OS }}/_version_.txt
+
       - name: Install Protoc
         uses: deep-soft/setup-protoc@v3
         with:
@@ -205,7 +225,6 @@ jobs:
         with:
           draft: ${{ env.DRAFT }}
           tag_name: ${{ env.TAG_NAME }}
-          ##./SignOutput/${{ env.PROG_NAME }}-*.exe
           files: |
             ${{ env.ZIP_ARCHIVE_RELEASE }}
             ${{ env.SHA_SUMS }}
@@ -218,7 +237,7 @@ jobs:
         uses: deep-soft/zip-release@v3
         with:
           type: '7z'
-          filename: '${{ env.TAG_VERSION }}${{ env.TAG_BUILD }}-${{ matrix.os }}-ALL'
+          filename: '${{ env.TAG_VERSION }}${{ env.TAG_BUILD }}-${{ matrix.os }}-${{ matrix.target }}-ALL'
           directory: '.'
           path: '.'
           exclusions: '*.git* /*node_modules/* .editorconfig'
