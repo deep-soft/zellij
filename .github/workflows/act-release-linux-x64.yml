@@ -3,7 +3,7 @@
 #
 # act-release-linux-x64.yml
 # act-release.yml
-name: act-Release
+name: act-Release-linux-x64
 
 on:
 #  push:
