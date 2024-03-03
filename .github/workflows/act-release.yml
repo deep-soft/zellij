@@ -38,6 +38,7 @@ jobs:
     env:
       RUST_BACKTRACE: 1
     strategy:
+      fail-fast: false
       matrix:
         build:
           - linux musl x64
@@ -130,17 +131,9 @@ jobs:
           echo GITHUB_WORKSPACE=$GITHUB_WORKSPACE
 
       - name: Install Protoc
-        uses: deep-soft/setup-protoc@v2
+        uses: deep-soft/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: ${{ matrix.rust }}
-          profile: minimal
-          override: true
-          target: ${{ matrix.target }}
 
       - name: Install Rust toolchain
         uses: deep-soft/rust-toolchain@master
@@ -150,9 +143,9 @@ jobs:
           components: ''
           #  Comma-separated string of additional components to install e.g. clippy, rustfmt
 
-      - uses: deep-soft/rust-cache@v2
-        with:
-          prefix-key: ${{ matrix.job.os }}
+#      - uses: deep-soft/rust-cache@v2
+#        with:
+#          prefix-key: ${{ matrix.job.os }}
 
       - name: Add WASM target
         run: |
