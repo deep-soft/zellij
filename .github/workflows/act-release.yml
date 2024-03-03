@@ -15,6 +15,11 @@ on:
         description: custom TAG_NAME
         default: "zellij"
         required: true
+      archive_ALL:
+        description: Archive ALL
+        type: boolean
+        default: false
+        required: true
 
 env:
   TAG_NAME:     "zellij"
@@ -181,7 +186,7 @@ jobs:
           type: 'sha256'
           filename: '${{ env.PROG_NAME }}-${{ env.VERSION }}-${{ matrix.target }}-${{ matrix.os }}.sha256'
           directory: './target/${{ matrix.target }}/release'
-          path: '.'
+          path: '${{ env.PROG_NAME }}'
           ignore_git: true
           # output env.SHA_SUMS
 
@@ -194,7 +199,7 @@ jobs:
           directory: './target/${{ matrix.target }}/release'
           exclusions: ''
           recursive_exclusions: ''
-          path: '.'
+          path: '${{ env.PROG_NAME }}'
           env_variable: ZIP_ARCHIVE_RELEASE
         # archive name is ${{ env.ZIP_RELEASE_ARCHIVE }}
 
@@ -209,3 +214,31 @@ jobs:
             ${{ env.ZIP_ARCHIVE_RELEASE }}
             ${{ env.SHA_SUMS }}
             ${{ env.WORK_DIR_OS }}/_version_.txt
+
+# zip release begin
+      - name: Create Archive ALL
+        id: zip_archive_all
+        if:  ${{ inputs.archive_ALL}}
+        uses: deep-soft/zip-release@v3
+        with:
+          type: '7z'
+          filename: '${{ env.TAG_VERSION }}${{ env.TAG_BUILD }}-${{ matrix.os }}-ALL'
+          directory: '.'
+          path: '.'
+          exclusions: '*.git* /*node_modules/* .editorconfig'
+          volume_size: '2g'
+          env_variable: 'ZIP_ARCHIVE_ALL'
+          # archive name is ${{ env.ZIP_RELEASE_ARCHIVE }}
+
+      - name: Publish Archive ALL
+        if:  ${{ inputs.archive_ALL}}
+        continue-on-error: true
+        uses: deep-soft/action-gh-release@v2.1
+        with:
+          draft: true
+          tag_name: ${{ env.TAG_VERSION }}${{ env.TAG_BUILD }}-ALL
+          filelist: ${{ steps.zip_archive_all.outputs.volumes_list_name }}
+          files: |
+              ${{ env.ZIP_ARCHIVE_ALL }}
+              ${{ env.WORK_DIR_OS }}/_version_.txt
+# zip release end
