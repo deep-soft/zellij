@@ -1,0 +1,279 @@
+# 2024-03-03 04:00
+#
+#
+# act-release-linux-x64.yml
+# act-release.yml
+name: act-Release
+
+on:
+#  push:
+#    tags:
+#      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      patch_src_input_mod:
+        description: patch src input mod.rs
+        type: boolean
+        default: false
+        required: true
+      custom_TAG_NAME:
+        description: custom TAG_NAME
+        default: "zellij"
+        required: true
+      use_rust_cache:
+        description: use rust cache
+        type: boolean
+        default: false
+        required: true
+      archive_ALL:
+        description: Archive ALL
+        type: boolean
+        default: false
+        required: true
+
+env:
+  TAG_NAME:     "zellij"
+  TAG_VERSION:  "zellij-v0.0.1"
+  TAG_BUILD:    "-b"
+  TAG_REF:      "0000000"
+  PROG_NAME:    "zellij"
+  PROG_VERSION: "v0.0.1"
+  VERSION:      "0.0.1"
+  DRAFT:        "false"
+
+jobs:
+  build-release:
+    name: build-release
+    runs-on: ${{ matrix.os }}
+    env:
+      RUST_BACKTRACE: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+          - linux-musl-x64
+#          - linux-musl-aarch64
+          - macos-x64
+#          - macos-aarch64
+        include:
+          - { build: linux-musl-x64    , os: ubuntu-latest, rust_toolchain: stable, target: x86_64-unknown-linux-musl  }
+#          - { build: linux-musl-aarch64, os: ubuntu-latest, rust_toolchain: stable, target: aarch64-unknown-linux-musl }
+#          - { build: macos-x64         , os: macos-latest , rust_toolchain: stable, target: x86_64-apple-darwin        }
+#          - { build: macos-aarch64     , os: macos-latest , rust_toolchain: stable, target: aarch64-apple-darwin       }
+    steps:
+      - name: Checkout source code
+        uses: deep-soft/checkout@v4
+
+# zellij-utils/src/input/mod.rs
+      - name: patch zellij-utils/src/input/mod.rs
+        if: ${{ inputs.patch_src_input_mod }}
+        shell: bash
+        run: |
+          if [[ -f bins/mod.rs ]]; then
+            cp bins/mod.rs zellij-utils/src/input/mod.rs
+          fi
+
+      - name: Set custom_TAG_NAME
+        shell: bash
+        run: |
+          if [[ "${{ inputs.custom_TAG_NAME }}" != "" ]]; then
+            echo "TAG_NAME=${{ inputs.custom_TAG_NAME }}" >> $GITHUB_ENV;
+          fi
+
+## -- read from toml - begin
+      - name: Read toml package.version
+        uses: deep-soft/toml-action@v1.0.3
+        id: read_toml_version
+        with:
+          file: 'Cargo.toml'
+          field: 'package.version'
+
+      - name: Set env.PROG_VERSION
+        shell: bash
+        run: |
+          echo "PROG_VERSION = ${{ env.PROG_VERSION }}"
+
+          echo "set PROG_VERSION with value from Cargo.toml"
+          _version_=${{ steps.read_toml_version.outputs.value }}
+          prog_version="v"$_version_
+
+          echo "PROG_VERSION = $prog_version"
+          echo "TAG_VERSION=${{ env.PROG_NAME }}-$prog_version"
+
+          echo "set env.PROG_VERSION with value from Cargo.toml"
+          echo "PROG_VERSION=$prog_version" >> $GITHUB_ENV
+          echo "VERSION=$_version_" >> $GITHUB_ENV
+          echo "TAG_VERSION=${{ env.PROG_NAME }}-$prog_version" >> $GITHUB_ENV
+
+      - name: Print env.PROG_VERSION
+        shell: bash
+        run: |
+          echo "show new value for env.PROG_VERSION"
+          echo "PROG_VERSION = ${{ env.PROG_VERSION }}"
+          echo "TAG_VERSION  = ${{ env.TAG_VERSION  }}"
+## -- read from toml - end
+
+# - get ref set build begin
+      - name: Get ref, set build version
+        shell: bash
+        run: |
+          _ref_all_=$(git log -1 --format='%H')
+          # _ref_=$(echo ${_ref_all_::7})
+          _date_=$(date +%Y%m%d-%H%M)
+          _date_YMD=$(date +%Y%m%d)
+          _ref_org_=${{ env.TAG_REF }}
+          _ref_len_="${#_ref_org_}"
+          _ref_=$(echo ${_ref_all_::$_ref_len_})
+          echo "TAG_REF=$_ref_" >> $GITHUB_ENV
+          _build_=${{ env.TAG_BUILD }}-$_date_-$_ref_
+          echo "TAG_BUILD=$_build_" >> $GITHUB_ENV
+          echo "WORK_DIR_BASH=$(pwd)" >> $GITHUB_ENV
+          echo "TAG_DATE=$_date_" >> $GITHUB_ENV
+          echo "DATE_YMD=$_date_YMD" >> $GITHUB_ENV
+
+      - name: set WORK_DIR_OS
+        shell: bash
+        run: |
+          WORK_DIR_OS=$(pwd)
+          echo WORK_DIR_OS=$WORK_DIR_OS
+          echo WORK_DIR_OS=$WORK_DIR_OS>> $GITHUB_ENV
+          echo GITHUB_WORKSPACE=$GITHUB_WORKSPACE
+
+      - name: Print ref, build version
+        shell: bash
+        run: |
+          echo "REF: ${{ env.TAG_REF }}
+          echo "BLD: ${{ env.TAG_BUILD }}
+          echo "${{ env.TAG_NAME }}-${{ env.TAG_BUILD }}" > ${{ env.WORK_DIR_BASH }}/_version_.txt
+          echo "WORK_DIR_BASH=${{ env.WORK_DIR_BASH }}"
+          echo "WORK_DIR_OS=${{ env.WORK_DIR_OS }}"
+          echo GITHUB_WORKSPACE=$GITHUB_WORKSPACE
+
+      - name: Prepare Publish Release
+        continue-on-error: true
+        uses: deep-soft/action-gh-release@v2.1
+        with:
+          draft: ${{ env.DRAFT }}
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            ${{ env.WORK_DIR_OS }}/_version_.txt
+
+      - name: Prepare Release Publish Archive ALL
+        if:  ${{ inputs.archive_ALL}}
+        continue-on-error: true
+        uses: deep-soft/action-gh-release@v2.1
+        with:
+          draft: true
+          tag_name: ${{ env.TAG_VERSION }}${{ env.TAG_BUILD }}-ALL
+          filelist: ''
+          files: |
+              ${{ env.WORK_DIR_OS }}/_version_.txt
+
+      - name: Install Protoc
+        uses: deep-soft/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        uses: deep-soft/rust-toolchain-actions-rs@v4
+        with:
+          toolchain: ${{ matrix.rust_toolchain }}
+          target: ${{ matrix.target }}
+          profile: minimal
+          override: true
+          default: false
+          components: ''
+          #  Comma-separated string of additional components to install e.g. clippy, rustfmt
+
+      - uses: deep-soft/rust-cache@v2
+        if: ${{ inputs.use_rust_cache }}
+        with:
+          prefix-key: ${{ matrix.os }}
+
+      - name: Add WASM target
+        run: |
+          rustup target add wasm32-wasi
+
+      - name: Install musl-tools
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get install -y --no-install-recommends musl-tools
+        
+      # Workaround for <https://github.com/actions/virtual-environments/issues/2557>
+      - name: Switch Xcode SDK
+        if: runner.os == 'macos'
+        run: |
+          cat <<EOF >> "$GITHUB_ENV"
+          SDKROOT=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
+          EOF
+
+      - name: Build release binary
+        run: |
+          cargo xtask ci cross ${{ matrix.target }}
+
+      # this breaks on aarch64 and this if conditional isn't working for some reason: TODO: investigate
+      #- name: Strip release binary
+      #  if: runner.target != 'aarch64-unknown-linux-musl' && runner.target != 'aarch64-apple-darwin'
+      #  run: strip "target/${{ matrix.target }}/release/zellij"
+
+      - name: Create SHA256 checksum
+        uses: deep-soft/sha-checksums@v1
+        with:
+          type: 'sha256'
+          filename: '${{ env.PROG_NAME }}-${{ env.VERSION }}-${{ matrix.target }}-${{ matrix.os }}.sha256'
+          directory: './target/${{ matrix.target }}/release'
+          path: '${{ env.PROG_NAME }}'
+          ignore_git: true
+          # output env.SHA_SUMS
+
+      - name: Create archive release
+        continue-on-error: true
+        uses: deep-soft/zip-release@v3
+        with:
+          type: 'tar.xz'
+          filename: '${{ env.PROG_NAME }}-${{ env.VERSION }}-${{ matrix.target }}-${{ matrix.os }}'
+          directory: './target/${{ matrix.target }}/release'
+          exclusions: ''
+          recursive_exclusions: ''
+          path: '${{ env.PROG_NAME }}'
+          env_variable: ZIP_ARCHIVE_RELEASE
+        # archive name is ${{ env.ZIP_RELEASE_ARCHIVE }}
+
+      - name: Publish Release
+        continue-on-error: true
+        uses: deep-soft/action-gh-release@v2.1
+        with:
+          draft: ${{ env.DRAFT }}
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            ${{ env.ZIP_ARCHIVE_RELEASE }}
+            ${{ env.SHA_SUMS }}
+            ${{ env.WORK_DIR_OS }}/_version_.txt
+
+# zip release begin
+      - name: Create Archive ALL
+        id: zip_archive_all
+        if:  ${{ inputs.archive_ALL}}
+        uses: deep-soft/zip-release@v3
+        with:
+          type: '7z'
+          filename: '${{ env.TAG_VERSION }}${{ env.TAG_BUILD }}-${{ matrix.os }}-${{ matrix.target }}-ALL'
+          directory: '.'
+          path: '.'
+          exclusions: '*.git* /*node_modules/* .editorconfig'
+          volume_size: '2g'
+          env_variable: 'ZIP_ARCHIVE_ALL'
+          # archive name is ${{ env.ZIP_RELEASE_ARCHIVE }}
+
+      - name: Publish Archive ALL
+        if:  ${{ inputs.archive_ALL}}
+        continue-on-error: true
+        uses: deep-soft/action-gh-release@v2.1
+        with:
+          draft: true
+          tag_name: ${{ env.TAG_VERSION }}${{ env.TAG_BUILD }}-ALL
+          filelist: ${{ steps.zip_archive_all.outputs.volumes_list_name }}
+          files: |
+              ${{ env.ZIP_ARCHIVE_ALL }}
+              ${{ env.WORK_DIR_OS }}/_version_.txt
+# zip release end
