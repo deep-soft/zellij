@@ -11,6 +11,11 @@ on:
 #      - 'v*.*.*'
   workflow_dispatch:
     inputs:
+      patch_src_input_mod:
+        description: patch src input mod.rs
+        type: boolean
+        default: false
+        required: true
       custom_TAG_NAME:
         description: custom TAG_NAME
         default: "zellij"
@@ -58,6 +63,15 @@ jobs:
     steps:
       - name: Checkout source code
         uses: deep-soft/checkout@v4
+
+# zellij-utils/src/input/mod.rs
+      - name: patch zellij-utils/src/input/mod.rs
+        if: ${{ inputs.patch_src_input_mod }}
+        shell: bash
+        run: |
+          if [[ -f bins/mod.rs ]]; then
+            cp bins/mod.rs zellij-utils/src/input/mod.rs
+          fi
 
       - name: Set custom_TAG_NAME
         shell: bash
