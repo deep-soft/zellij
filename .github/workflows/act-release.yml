@@ -15,6 +15,11 @@ on:
         description: custom TAG_NAME
         default: "zellij"
         required: true
+      use_rust_cache:
+        description: use rust cache
+        type: boolean
+        default: false
+        required: true
       archive_ALL:
         description: Archive ALL
         type: boolean
@@ -167,6 +172,7 @@ jobs:
           #  Comma-separated string of additional components to install e.g. clippy, rustfmt
 
       - uses: deep-soft/rust-cache@v2
+        if: ${{ inputs.use_rust_cache }}
         with:
           prefix-key: ${{ matrix.os }}
 
