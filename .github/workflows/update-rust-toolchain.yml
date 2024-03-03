@@ -1,8 +1,9 @@
+# needs: token: ${{ secrets.GH_TOKEN_FOR_UPDATES }}
 name: update-rust-toolchain
 on:
   workflow_dispatch: # allows manual triggering
-  schedule:
-    - cron: '0 0 1 * *' # runs on the first of every month at 00:00
+#  schedule:
+#    - cron: '0 0 1 * *' # runs on the first of every month at 00:00
 
 jobs:
   update-rust-toolchain:
@@ -11,10 +12,11 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: deep-soft/checkout@v4
+
       - name: update rust toolchain
         id: urt
-        uses: a-kenji/update-rust-toolchain@v1.1
+        uses: deep-soft/update-rust-toolchain@v1.1
         with:
           minor-version-delta: 2
           toolchain-path: './rust-toolchain.toml'
