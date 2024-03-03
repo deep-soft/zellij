@@ -41,15 +41,15 @@ jobs:
       fail-fast: false
       matrix:
         build:
-          - linux musl x64
-          - linux musl aarch64
-          - macos x64
-          - macos aarch64
+          - linux-musl-x64
+          - linux-musl-aarch64
+          - macos-x64
+          - macos-aarch64
         include:
-          - { build: linux musl x64    , os: ubuntu-latest, rust: stable, target: x86_64-unknown-linux-musl  }
-          - { build: linux musl aarch64, os: ubuntu-latest, rust: stable, target: aarch64-unknown-linux-musl }
-          - { build: macos x64         , os: macos-latest , rust: stable, target: x86_64-apple-darwin        }
-          - { build: macos aarch64     , os: macos-latest , rust: stable, target: aarch64-apple-darwin       }
+          - { build: linux-musl-x64    , os: ubuntu-latest, rust_toolchain: stable, target: x86_64-unknown-linux-musl  }
+          - { build: linux-musl-aarch64, os: ubuntu-latest, rust_toolchain: stable, target: aarch64-unknown-linux-musl }
+          - { build: macos-x64         , os: macos-latest , rust_toolchain: stable, target: x86_64-apple-darwin        }
+          - { build: macos-aarch64     , os: macos-latest , rust_toolchain: stable, target: aarch64-apple-darwin       }
     steps:
       - name: Checkout source code
         uses: deep-soft/checkout@v4
@@ -136,16 +136,19 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Rust toolchain
-        uses: deep-soft/rust-toolchain@master
+        uses: deep-soft/rust-toolchain-actions-rs@v4
         with:
-          toolchain: ${{ matrix.rust }}
-          targets: ${{ matrix.target }}
+          toolchain: ${{ matrix.rust_toolchain }}
+          target: ${{ matrix.target }}
+          profile: minimal
+          override: true
+          default: false
           components: ''
           #  Comma-separated string of additional components to install e.g. clippy, rustfmt
 
-#      - uses: deep-soft/rust-cache@v2
-#        with:
-#          prefix-key: ${{ matrix.job.os }}
+      - uses: deep-soft/rust-cache@v2
+        with:
+          prefix-key: ${{ matrix.os }}
 
       - name: Add WASM target
         run: |
