@@ -70,7 +70,8 @@ jobs:
         shell: bash
         run: |
           if [[ -f bins/mod.rs ]]; then
-            cp bins/mod.rs zellij-utils/src/input/mod.rs
+            cp bins/mod.rs zellij-utils/src/input/mod.rs || true;
+            cat zellij-utils/src/input/mod.rs || true;
           fi
 
       - name: Set custom_TAG_NAME
