@@ -27,7 +27,7 @@
 
 # What is this?
 
-[Zellij](https://en.wikipedia.org/wiki/Zellij) is a workspace aimed at developers, ops-oriented people and anyone who loves the terminal. Similar programs are sometimes called "Terminal Multiplexers".
+[Zellij](#origin-of-the-name) is a workspace aimed at developers, ops-oriented people and anyone who loves the terminal. Similar programs are sometimes called "Terminal Multiplexers".
 
 Zellij is designed around the philosophy that one must not sacrifice simplicity for power, taking pride in its great experience out of the box as well as the advanced features it places at its users' fingertips.
 
@@ -60,17 +60,6 @@ fish/xonsh:
 bash -c 'bash <(curl -L zellij.dev/launch)'
 ```
 
-## How do I get involved?
-
-Zellij is a labour of love built by an enthusiastic team of volunteers. We eagerly welcome anyone who would like to join us, regardless of experience level, so long as they adhere to our [Code of Conduct](CODE_OF_CONDUCT.md).
-
-Please report any code of conduct violations to [aram@poor.dev](mailto:aram@poor.dev)
-
-To get started, you can:
-1. Take a look at the [Issues](https://github.com/zellij-org/zellij/issues) in this repository - especially those marked "good first issue". Those with the "help wanted" tag probably don't have anyone else working on them.
-2. Drop by our [Discord](https://discord.gg/CrUAFH3), or [Matrix](https://matrix.to/#/#zellij_general:matrix.org) chat and ask what you can work on, or how to get started.
-3. Open an issue with your idea(s) for the project or tell us about them in our chat.
-
 ## How do I start a development environment?
 
 * Clone the project
@@ -93,7 +82,12 @@ These are issues that are either being actively worked on or are planned for the
 
 ***If you'll click on the image, you'll be led to an SVG version of it on the website where you can directly click on every issue***
 
-[![roadmap](https://user-images.githubusercontent.com/795598/228612600-78fbd05a-ec84-484d-8b82-bba071460690.png)](https://zellij.dev/roadmap)
+[![roadmap](https://github.com/zellij-org/zellij/assets/795598/9c5b573b-20f5-41c6-908b-6b21c5fd456e)](https://zellij.dev/roadmap)
+
+## Origin of the Name
+[From Wikipedia, the free encyclopedia](https://en.wikipedia.org/wiki/Zellij)
+
+Zellij (Arabic: الزليج, romanized: zillīj; also spelled zillij or zellige) is a style of mosaic tilework made from individually hand-chiseled tile pieces. The pieces were typically of different colours and fitted together to form various patterns on the basis of tessellations, most notably elaborate Islamic geometric motifs such as radiating star patterns composed of various polygons. This form of Islamic art is one of the main characteristics of architecture in the western Islamic world. It is found in the architecture of Morocco, the architecture of Algeria, early Islamic sites in Tunisia, and in the historic monuments of al-Andalus (in the Iberian Peninsula).
 
 ## License
 
@@ -101,3 +95,5 @@ MIT
 
 ## Sponsored by
 <a href="https://github.com/tbjers"><img src="https://avatars.githubusercontent.com/u/1117052?v=4" width="80px"></a>
+&nbsp;
+<a href="https://terminaltrove.com/"><img src="https://avatars.githubusercontent.com/u/121595180?s=200&v=4" width="80px"></a>

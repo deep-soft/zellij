@@ -106,8 +106,14 @@ pub enum Sessions {
         /// Print just the session name
         #[clap(short, long, value_parser, takes_value(false), default_value("false"))]
         short: bool,
-    },
 
+        /// List the sessions in reverse order (default is ascending order)
+        #[clap(short, long, value_parser, takes_value(false), default_value("false"))]
+        reverse: bool,
+    },
+    /// List existing plugin aliases
+    #[clap(visible_alias = "la")]
+    ListAliases,
     /// Attach to a session
     #[clap(visible_alias = "a")]
     Attach {
@@ -118,6 +124,10 @@ pub enum Sessions {
         /// Create a session if one does not exist.
         #[clap(short, long, value_parser)]
         create: bool,
+
+        /// Create a detached session in the background if one does not exist
+        #[clap(short('b'), long, value_parser)]
+        create_background: bool,
 
         /// Number of the session index in the active sessions ordered creation date.
         #[clap(long, value_parser)]
@@ -231,7 +241,7 @@ pub enum Sessions {
         height: Option<String>,
     },
     /// Load a plugin
-    #[clap(visible_alias = "r")]
+    #[clap(visible_alias = "p")]
     Plugin {
         /// Plugin URL, can either start with http(s), file: or zellij:
         #[clap(last(true), required(true))]
@@ -611,6 +621,10 @@ pub enum CliAction {
         #[clap(short, long, value_parser, requires("layout"))]
         cwd: Option<PathBuf>,
     },
+    /// Move the focused tab in the specified direction. [right|left]
+    MoveTab {
+        direction: Direction,
+    },
     PreviousSwapLayout,
     NextSwapLayout,
     /// Query all tab names
@@ -722,4 +736,5 @@ tail -f /tmp/my-live-logfile | zellij action pipe --name logs --plugin https://e
         #[clap(short('t'), long, value_parser, display_order(10))]
         plugin_title: Option<String>,
     },
+    ListClients,
 }

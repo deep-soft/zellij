@@ -37,6 +37,7 @@ use zellij_utils::{
     },
     ipc::ClientAttributes,
     pane_size::Size,
+    session_serialization,
 };
 
 pub type PluginId = u32;
@@ -104,9 +105,24 @@ pub enum PluginInstruction {
         Option<PathBuf>,
     ),
     DumpLayout(SessionLayoutMetadata, ClientId),
+    ListClientsMetadata(SessionLayoutMetadata, ClientId),
+    DumpLayoutToPlugin(SessionLayoutMetadata, PluginId),
     LogLayoutToHd(SessionLayoutMetadata),
     CliPipe {
         pipe_id: String,
+        name: String,
+        payload: Option<String>,
+        plugin: Option<String>,
+        args: Option<BTreeMap<String, String>>,
+        configuration: Option<BTreeMap<String, String>>,
+        floating: Option<bool>,
+        pane_id_to_replace: Option<PaneId>,
+        pane_title: Option<String>,
+        cwd: Option<PathBuf>,
+        skip_cache: bool,
+        cli_client_id: ClientId,
+    },
+    KeybindPipe {
         name: String,
         payload: Option<String>,
         plugin: Option<String>,
@@ -127,6 +143,7 @@ pub enum PluginInstruction {
         message: MessageToPlugin,
     },
     UnblockCliPipes(Vec<PluginRenderAsset>),
+    WatchFilesystem,
     Exit,
 }
 
@@ -157,11 +174,15 @@ impl From<&PluginInstruction> for PluginContext {
                 PluginContext::PermissionRequestResult
             },
             PluginInstruction::DumpLayout(..) => PluginContext::DumpLayout,
+            PluginInstruction::ListClientsMetadata(..) => PluginContext::ListClientsMetadata,
             PluginInstruction::LogLayoutToHd(..) => PluginContext::LogLayoutToHd,
             PluginInstruction::CliPipe { .. } => PluginContext::CliPipe,
             PluginInstruction::CachePluginEvents { .. } => PluginContext::CachePluginEvents,
             PluginInstruction::MessageFromPlugin { .. } => PluginContext::MessageFromPlugin,
             PluginInstruction::UnblockCliPipes { .. } => PluginContext::UnblockCliPipes,
+            PluginInstruction::WatchFilesystem => PluginContext::WatchFilesystem,
+            PluginInstruction::KeybindPipe { .. } => PluginContext::KeybindPipe,
+            PluginInstruction::DumpLayoutToPlugin(..) => PluginContext::DumpLayoutToPlugin,
         }
     }
 }
@@ -171,6 +192,7 @@ pub(crate) fn plugin_thread_main(
     store: Store,
     data_dir: PathBuf,
     mut layout: Box<Layout>,
+    layout_dir: Option<PathBuf>,
     path_to_default_shell: PathBuf,
     zellij_cwd: PathBuf,
     capabilities: PluginCapabilities,
@@ -198,6 +220,7 @@ pub(crate) fn plugin_thread_main(
         client_attributes,
         default_shell,
         layout.clone(),
+        layout_dir,
     );
 
     loop {
@@ -427,16 +450,9 @@ pub(crate) fn plugin_thread_main(
                 )];
                 wasm_bridge.update_plugins(updates, shutdown_send.clone())?;
             },
-            PluginInstruction::PluginSubscribedToEvents(_plugin_id, _client_id, events) => {
-                for event in events {
-                    if let EventType::FileSystemCreate
-                    | EventType::FileSystemRead
-                    | EventType::FileSystemUpdate
-                    | EventType::FileSystemDelete = event
-                    {
-                        wasm_bridge.start_fs_watcher_if_not_started();
-                    }
-                }
+            PluginInstruction::PluginSubscribedToEvents(_plugin_id, _client_id, _events) => {
+                // no-op, there used to be stuff we did here - now there isn't, but we might want
+                // to add stuff here in the future
             },
             PluginInstruction::PermissionRequestResult(
                 plugin_id,
@@ -474,6 +490,39 @@ pub(crate) fn plugin_thread_main(
                     session_layout_metadata,
                     client_id,
                 )));
+            },
+            PluginInstruction::ListClientsMetadata(mut session_layout_metadata, client_id) => {
+                populate_session_layout_metadata(&mut session_layout_metadata, &wasm_bridge);
+                drop(bus.senders.send_to_pty(PtyInstruction::ListClientsMetadata(
+                    session_layout_metadata,
+                    client_id,
+                )));
+            },
+            PluginInstruction::DumpLayoutToPlugin(mut session_layout_metadata, plugin_id) => {
+                populate_session_layout_metadata(&mut session_layout_metadata, &wasm_bridge);
+                match session_serialization::serialize_session_layout(
+                    session_layout_metadata.into(),
+                ) {
+                    Ok((layout, _pane_contents)) => {
+                        let updates = vec![(
+                            Some(plugin_id),
+                            None,
+                            Event::CustomMessage("session_layout".to_owned(), layout),
+                        )];
+                        wasm_bridge.update_plugins(updates, shutdown_send.clone())?;
+                    },
+                    Err(e) => {
+                        let updates = vec![(
+                            Some(plugin_id),
+                            None,
+                            Event::CustomMessage(
+                                "session_layout_error".to_owned(),
+                                format!("{}", e),
+                            ),
+                        )];
+                        wasm_bridge.update_plugins(updates, shutdown_send.clone())?;
+                    },
+                }
             },
             PluginInstruction::LogLayoutToHd(mut session_layout_metadata) => {
                 populate_session_layout_metadata(&mut session_layout_metadata, &wasm_bridge);
@@ -524,6 +573,57 @@ pub(crate) fn plugin_thread_main(
                         // no specific destination, send to all plugins
                         pipe_to_all_plugins(
                             PipeSource::Cli(pipe_id.clone()),
+                            &name,
+                            &payload,
+                            &args,
+                            &mut wasm_bridge,
+                            &mut pipe_messages,
+                        );
+                    },
+                }
+                wasm_bridge.pipe_messages(pipe_messages, shutdown_send.clone())?;
+            },
+            PluginInstruction::KeybindPipe {
+                name,
+                payload,
+                plugin,
+                args,
+                configuration,
+                floating,
+                pane_id_to_replace,
+                pane_title,
+                cwd,
+                skip_cache,
+                cli_client_id,
+            } => {
+                let should_float = floating.unwrap_or(true);
+                let mut pipe_messages = vec![];
+                match plugin {
+                    Some(plugin_url) => {
+                        // send to specific plugin(s)
+                        pipe_to_specific_plugins(
+                            PipeSource::Keybind,
+                            &plugin_url,
+                            &configuration,
+                            &cwd,
+                            skip_cache,
+                            should_float,
+                            &pane_id_to_replace,
+                            &pane_title,
+                            Some(cli_client_id),
+                            &mut pipe_messages,
+                            &name,
+                            &payload,
+                            &args,
+                            &bus,
+                            &mut wasm_bridge,
+                            &plugin_aliases,
+                        );
+                    },
+                    None => {
+                        // no specific destination, send to all plugins
+                        pipe_to_all_plugins(
+                            PipeSource::Keybind,
                             &name,
                             &payload,
                             &args,
@@ -633,6 +733,9 @@ pub(crate) fn plugin_thread_main(
                         .send_to_server(ServerInstruction::UnblockCliPipeInput(pipe_name))
                         .context("failed to unblock input pipe");
                 }
+            },
+            PluginInstruction::WatchFilesystem => {
+                wasm_bridge.start_fs_watcher_if_not_started();
             },
             PluginInstruction::Exit => {
                 break;

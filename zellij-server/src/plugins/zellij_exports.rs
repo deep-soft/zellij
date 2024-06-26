@@ -154,6 +154,9 @@ fn host_run_plugin_command(env: FunctionEnvMut<ForeignFunctionEnv>) {
                     PluginCommand::NewTabsWithLayout(raw_layout) => {
                         new_tabs_with_layout(env, &raw_layout)?
                     },
+                    PluginCommand::NewTabsWithLayoutInfo(layout_info) => {
+                        new_tabs_with_layout_info(env, layout_info)?
+                    },
                     PluginCommand::NewTab => new_tab(env),
                     PluginCommand::GoToNextTab => go_to_next_tab(env),
                     PluginCommand::GoToPreviousTab => go_to_previous_tab(env),
@@ -259,6 +262,13 @@ fn host_run_plugin_command(env: FunctionEnvMut<ForeignFunctionEnv>) {
                     PluginCommand::MessageToPlugin(message) => message_to_plugin(env, message)?,
                     PluginCommand::DisconnectOtherClients => disconnect_other_clients(env),
                     PluginCommand::KillSessions(session_list) => kill_sessions(session_list),
+                    PluginCommand::ScanHostFolder(folder_to_scan) => {
+                        scan_host_folder(env, folder_to_scan)
+                    },
+                    PluginCommand::WatchFilesystem => watch_filesystem(env),
+                    PluginCommand::DumpSessionLayout => dump_session_layout(env),
+                    PluginCommand::CloseSelf => close_self(env),
+                    PluginCommand::RebindKeys(new_keybinds) => rebind_keys(env, new_keybinds)?,
                 },
                 (PermissionStatus::Denied, permission) => {
                     log::error!(
@@ -314,7 +324,13 @@ fn cli_pipe_output(env: &ForeignFunctionEnv, pipe_name: String, output: String) 
         .context("failed to send pipe output")
 }
 
-fn message_to_plugin(env: &ForeignFunctionEnv, message_to_plugin: MessageToPlugin) -> Result<()> {
+fn message_to_plugin(
+    env: &ForeignFunctionEnv,
+    mut message_to_plugin: MessageToPlugin,
+) -> Result<()> {
+    if message_to_plugin.plugin_url.as_ref().map(|s| s.as_str()) == Some("zellij:OWN_URL") {
+        message_to_plugin.plugin_url = Some(env.plugin_env.plugin.location.display());
+    }
     env.plugin_env
         .senders
         .send_to_plugin(PluginInstruction::MessageFromPlugin {
@@ -398,6 +414,7 @@ fn get_plugin_ids(env: &ForeignFunctionEnv) {
     let ids = PluginIds {
         plugin_id: env.plugin_env.plugin_id,
         zellij_pid: process::id(),
+        initial_cwd: env.plugin_env.plugin_cwd.clone(),
     };
     ProtobufPluginIds::try_from(ids)
         .map_err(|e| anyhow!("Failed to serialized plugin ids: {}", e))
@@ -502,11 +519,12 @@ fn open_file_in_place(env: &ForeignFunctionEnv, file_to_open: FileToOpen) {
 fn open_terminal(env: &ForeignFunctionEnv, cwd: PathBuf) {
     let error_msg = || format!("failed to open file in plugin {}", env.plugin_env.name());
     let cwd = env.plugin_env.plugin_cwd.join(cwd);
-    let mut default_shell = env
-        .plugin_env
-        .default_shell
-        .clone()
-        .unwrap_or_else(|| TerminalAction::RunCommand(RunCommand::default()));
+    let mut default_shell = env.plugin_env.default_shell.clone().unwrap_or_else(|| {
+        TerminalAction::RunCommand(RunCommand {
+            command: env.plugin_env.path_to_default_shell.clone(),
+            ..Default::default()
+        })
+    });
     default_shell.change_cwd(cwd);
     let run_command_action: Option<RunCommandAction> = match default_shell {
         TerminalAction::RunCommand(run_command) => Some(run_command.into()),
@@ -523,11 +541,12 @@ fn open_terminal_floating(
 ) {
     let error_msg = || format!("failed to open file in plugin {}", env.plugin_env.name());
     let cwd = env.plugin_env.plugin_cwd.join(cwd);
-    let mut default_shell = env
-        .plugin_env
-        .default_shell
-        .clone()
-        .unwrap_or_else(|| TerminalAction::RunCommand(RunCommand::default()));
+    let mut default_shell = env.plugin_env.default_shell.clone().unwrap_or_else(|| {
+        TerminalAction::RunCommand(RunCommand {
+            command: env.plugin_env.path_to_default_shell.clone(),
+            ..Default::default()
+        })
+    });
     default_shell.change_cwd(cwd);
     let run_command_action: Option<RunCommandAction> = match default_shell {
         TerminalAction::RunCommand(run_command) => Some(run_command.into()),
@@ -540,11 +559,12 @@ fn open_terminal_floating(
 fn open_terminal_in_place(env: &ForeignFunctionEnv, cwd: PathBuf) {
     let error_msg = || format!("failed to open file in plugin {}", env.plugin_env.name());
     let cwd = env.plugin_env.plugin_cwd.join(cwd);
-    let mut default_shell = env
-        .plugin_env
-        .default_shell
-        .clone()
-        .unwrap_or_else(|| TerminalAction::RunCommand(RunCommand::default()));
+    let mut default_shell = env.plugin_env.default_shell.clone().unwrap_or_else(|| {
+        TerminalAction::RunCommand(RunCommand {
+            command: env.plugin_env.path_to_default_shell.clone(),
+            ..Default::default()
+        })
+    });
     default_shell.change_cwd(cwd);
     let run_command_action: Option<RunCommandAction> = match default_shell {
         TerminalAction::RunCommand(run_command) => Some(run_command.into()),
@@ -807,6 +827,32 @@ fn show_self(env: &ForeignFunctionEnv, should_float_if_hidden: bool) {
     apply_action!(action, error_msg, env);
 }
 
+fn close_self(env: &ForeignFunctionEnv) {
+    env.plugin_env
+        .senders
+        .send_to_screen(ScreenInstruction::ClosePane(
+            PaneId::Plugin(env.plugin_env.plugin_id),
+            None,
+        ))
+        .with_context(|| format!("failed to close self"))
+        .non_fatal();
+    env.plugin_env
+        .senders
+        .send_to_plugin(PluginInstruction::Unload(env.plugin_env.plugin_id))
+        .with_context(|| format!("failed to close self"))
+        .non_fatal();
+}
+
+fn rebind_keys(env: &ForeignFunctionEnv, new_keybinds: String) -> Result<()> {
+    let err_context = || "Failed to rebind keys";
+    let client_id = env.plugin_env.client_id;
+    env.plugin_env
+        .senders
+        .send_to_server(ServerInstruction::RebindKeys(client_id, new_keybinds))
+        .with_context(err_context)?;
+    Ok(())
+}
+
 fn switch_to_mode(env: &ForeignFunctionEnv, input_mode: InputMode) {
     let action = Action::SwitchToMode(input_mode);
     let error_msg = || {
@@ -827,6 +873,19 @@ fn new_tabs_with_layout(env: &ForeignFunctionEnv, raw_layout: &str) -> Result<()
         None,
     )
     .map_err(|e| anyhow!("Failed to parse layout: {:?}", e))?;
+    apply_layout(env, layout);
+    Ok(())
+}
+
+fn new_tabs_with_layout_info(env: &ForeignFunctionEnv, layout_info: LayoutInfo) -> Result<()> {
+    // TODO: cwd
+    let layout = Layout::from_layout_info(&env.plugin_env.layout_dir, layout_info)
+        .map_err(|e| anyhow!("Failed to parse layout: {:?}", e))?;
+    apply_layout(env, layout);
+    Ok(())
+}
+
+fn apply_layout(env: &ForeignFunctionEnv, layout: Layout) {
     let mut tabs_to_open = vec![];
     let tabs = layout.tabs();
     if tabs.is_empty() {
@@ -858,7 +917,6 @@ fn new_tabs_with_layout(env: &ForeignFunctionEnv, raw_layout: &str) -> Result<()
         let error_msg = || format!("Failed to create layout tab");
         apply_action!(action, error_msg, env);
     }
-    Ok(())
 }
 
 fn new_tab(env: &ForeignFunctionEnv) {
@@ -1004,7 +1062,7 @@ fn edit_scrollback(env: &ForeignFunctionEnv) {
 
 fn write(env: &ForeignFunctionEnv, bytes: Vec<u8>) {
     let error_msg = || format!("failed to write in plugin {}", env.plugin_env.name());
-    let action = Action::Write(bytes);
+    let action = Action::Write(None, bytes, false);
     apply_action!(action, error_msg, env);
 }
 
@@ -1326,6 +1384,90 @@ fn kill_sessions(session_names: Vec<String>) {
     }
 }
 
+fn watch_filesystem(env: &ForeignFunctionEnv) {
+    let _ = env
+        .plugin_env
+        .senders
+        .to_plugin
+        .as_ref()
+        .map(|sender| sender.send(PluginInstruction::WatchFilesystem));
+}
+
+fn dump_session_layout(env: &ForeignFunctionEnv) {
+    let _ = env.plugin_env.senders.to_screen.as_ref().map(|sender| {
+        sender.send(ScreenInstruction::DumpLayoutToPlugin(
+            env.plugin_env.plugin_id,
+        ))
+    });
+}
+
+fn scan_host_folder(env: &ForeignFunctionEnv, folder_to_scan: PathBuf) {
+    if !folder_to_scan.starts_with("/host") {
+        log::error!(
+            "Can only scan files in the /host filesystem, found: {}",
+            folder_to_scan.display()
+        );
+        return;
+    }
+    let plugin_host_folder = env.plugin_env.plugin_cwd.clone();
+    let folder_to_scan = plugin_host_folder.join(folder_to_scan.strip_prefix("/host").unwrap());
+    match folder_to_scan.canonicalize() {
+        Ok(folder_to_scan) => {
+            if !folder_to_scan.starts_with(&plugin_host_folder) {
+                log::error!(
+                    "Can only scan files in the plugin filesystem: {}, found: {}",
+                    plugin_host_folder.display(),
+                    folder_to_scan.display()
+                );
+                return;
+            }
+            let reading_folder = std::fs::read_dir(&folder_to_scan);
+            match reading_folder {
+                Ok(reading_folder) => {
+                    let send_plugin_instructions = env.plugin_env.senders.to_plugin.clone();
+                    let update_target = Some(env.plugin_env.plugin_id);
+                    let client_id = env.plugin_env.client_id;
+                    thread::spawn({
+                        move || {
+                            let mut paths_in_folder = vec![];
+                            for entry in reading_folder {
+                                if let Ok(entry) = entry {
+                                    let entry_metadata = entry.metadata().ok().map(|m| m.into());
+                                    paths_in_folder.push((
+                                        PathBuf::from("/host").join(
+                                            entry.path().strip_prefix(&plugin_host_folder).unwrap(),
+                                        ),
+                                        entry_metadata.into(),
+                                    ));
+                                }
+                            }
+                            let _ = send_plugin_instructions
+                                .ok_or(anyhow!("found no sender to send plugin instruction to"))
+                                .map(|sender| {
+                                    let _ = sender.send(PluginInstruction::Update(vec![(
+                                        update_target,
+                                        Some(client_id),
+                                        Event::FileSystemUpdate(paths_in_folder),
+                                    )]));
+                                })
+                                .non_fatal();
+                        }
+                    });
+                },
+                Err(e) => {
+                    log::error!("Failed to read folder {}: {e}", folder_to_scan.display());
+                },
+            }
+        },
+        Err(e) => {
+            log::error!(
+                "Failed to canonicalize path {folder_to_scan:?} when scanning folder: {:?}",
+                e
+            );
+        },
+    }
+}
+
 // Custom panic handler for plugins.
 //
 // This is called when a panic occurs in a plugin. Since most panics will likely originate in the
@@ -1410,6 +1552,7 @@ fn check_command_permission(
         PluginCommand::SwitchTabTo(..)
         | PluginCommand::SwitchToMode(..)
         | PluginCommand::NewTabsWithLayout(..)
+        | PluginCommand::NewTabsWithLayoutInfo(..)
         | PluginCommand::NewTab
         | PluginCommand::GoToNextTab
         | PluginCommand::GoToPreviousTab
@@ -1461,6 +1604,8 @@ fn check_command_permission(
         | PluginCommand::BlockCliPipeInput(..)
         | PluginCommand::CliPipeOutput(..) => PermissionType::ReadCliPipes,
         PluginCommand::MessageToPlugin(..) => PermissionType::MessageAndLaunchOtherPlugins,
+        PluginCommand::DumpSessionLayout => PermissionType::ReadApplicationState,
+        PluginCommand::RebindKeys(..) => PermissionType::RebindKeys,
         _ => return (PermissionStatus::Granted, None),
     };
 

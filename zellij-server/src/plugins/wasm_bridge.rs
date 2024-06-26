@@ -101,6 +101,7 @@ pub struct WasmBridge {
     cached_plugin_map:
         HashMap<RunPluginLocation, HashMap<PluginUserConfiguration, Vec<(PluginId, ClientId)>>>,
     pending_pipes: PendingPipes,
+    layout_dir: Option<PathBuf>,
 }
 
 impl WasmBridge {
@@ -114,6 +115,7 @@ impl WasmBridge {
         client_attributes: ClientAttributes,
         default_shell: Option<TerminalAction>,
         default_layout: Box<Layout>,
+        layout_dir: Option<PathBuf>,
     ) -> Self {
         let plugin_map = Arc::new(Mutex::new(PluginMap::default()));
         let connected_clients: Arc<Mutex<Vec<ClientId>>> = Arc::new(Mutex::new(vec![]));
@@ -143,6 +145,7 @@ impl WasmBridge {
             default_layout,
             cached_plugin_map: HashMap::new(),
             pending_pipes: Default::default(),
+            layout_dir,
         }
     }
     pub fn load_plugin(
@@ -198,6 +201,7 @@ impl WasmBridge {
                     let client_attributes = self.client_attributes.clone();
                     let default_shell = self.default_shell.clone();
                     let default_layout = self.default_layout.clone();
+                    let layout_dir = self.layout_dir.clone();
                     async move {
                         let _ = senders.send_to_background_jobs(
                             BackgroundJob::AnimatePluginLoading(plugin_id),
@@ -244,6 +248,7 @@ impl WasmBridge {
                             default_shell,
                             default_layout,
                             skip_cache,
+                            layout_dir,
                         ) {
                             Ok(_) => handle_plugin_successful_loading(&senders, plugin_id),
                             Err(e) => handle_plugin_loading_failure(
@@ -334,6 +339,7 @@ impl WasmBridge {
             let client_attributes = self.client_attributes.clone();
             let default_shell = self.default_shell.clone();
             let default_layout = self.default_layout.clone();
+            let layout_dir = self.layout_dir.clone();
             async move {
                 match PluginLoader::reload_plugin(
                     first_plugin_id,
@@ -350,6 +356,7 @@ impl WasmBridge {
                     client_attributes.clone(),
                     default_shell.clone(),
                     default_layout.clone(),
+                    layout_dir.clone(),
                 ) {
                     Ok(_) => {
                         handle_plugin_successful_loading(&senders, first_plugin_id);
@@ -374,6 +381,7 @@ impl WasmBridge {
                                 client_attributes.clone(),
                                 default_shell.clone(),
                                 default_layout.clone(),
+                                layout_dir.clone(),
                             ) {
                                 Ok(_) => handle_plugin_successful_loading(&senders, *plugin_id),
                                 Err(e) => handle_plugin_loading_failure(
@@ -425,6 +433,7 @@ impl WasmBridge {
             self.client_attributes.clone(),
             self.default_shell.clone(),
             self.default_layout.clone(),
+            self.layout_dir.clone(),
         ) {
             Ok(_) => {
                 let _ = self
@@ -534,8 +543,6 @@ impl WasmBridge {
         mut updates: Vec<(Option<PluginId>, Option<ClientId>, Event)>,
         shutdown_sender: Sender<()>,
     ) -> Result<()> {
-        let err_context = || "failed to update plugin state".to_string();
-
         let plugins_to_update: Vec<(
             PluginId,
             ClientId,
@@ -554,56 +561,62 @@ impl WasmBridge {
                     .contains_key(&plugin_id)
             })
             .collect();
-        for (pid, cid, event) in updates.drain(..) {
-            for (plugin_id, client_id, running_plugin, subscriptions) in &plugins_to_update {
-                let subs = subscriptions.lock().unwrap().clone();
-                // FIXME: This is very janky... Maybe I should write my own macro for Event -> EventType?
-                let event_type =
-                    EventType::from_str(&event.to_string()).with_context(err_context)?;
-                if (subs.contains(&event_type) || event_type == EventType::PermissionRequestResult)
-                    && Self::message_is_directed_at_plugin(pid, cid, plugin_id, client_id)
-                {
-                    task::spawn({
-                        let senders = self.senders.clone();
-                        let running_plugin = running_plugin.clone();
-                        let event = event.clone();
-                        let plugin_id = *plugin_id;
-                        let client_id = *client_id;
-                        let _s = shutdown_sender.clone();
-                        async move {
-                            let mut running_plugin = running_plugin.lock().unwrap();
-                            let mut plugin_render_assets = vec![];
-                            let _s = _s; // guard to allow the task to complete before cleanup/shutdown
-                            match apply_event_to_plugin(
-                                plugin_id,
-                                client_id,
-                                &mut running_plugin,
-                                &event,
-                                &mut plugin_render_assets,
-                            ) {
-                                Ok(()) => {
-                                    let _ = senders.send_to_screen(ScreenInstruction::PluginBytes(
-                                        plugin_render_assets,
-                                    ));
-                                },
-                                Err(e) => {
-                                    log::error!("{:?}", e);
+        task::spawn({
+            let mut updates = updates.clone();
+            let senders = self.senders.clone();
+            let s = shutdown_sender.clone();
+            async move {
+                let _s = s;
+                for (pid, cid, event) in updates.drain(..) {
+                    for (plugin_id, client_id, running_plugin, subscriptions) in &plugins_to_update
+                    {
+                        let subs = subscriptions.lock().unwrap().clone();
+                        // FIXME: This is very janky... Maybe I should write my own macro for Event -> EventType?
+                        if let Ok(event_type) = EventType::from_str(&event.to_string()) {
+                            if (subs.contains(&event_type)
+                                || event_type == EventType::PermissionRequestResult)
+                                && Self::message_is_directed_at_plugin(
+                                    pid, cid, plugin_id, client_id,
+                                )
+                            {
+                                let mut running_plugin = running_plugin.lock().unwrap();
+                                let mut plugin_render_assets = vec![];
+                                match apply_event_to_plugin(
+                                    *plugin_id,
+                                    *client_id,
+                                    &mut running_plugin,
+                                    &event,
+                                    &mut plugin_render_assets,
+                                    senders.clone(),
+                                ) {
+                                    Ok(()) => {
+                                        let _ = senders.send_to_screen(
+                                            ScreenInstruction::PluginBytes(plugin_render_assets),
+                                        );
+                                    },
+                                    Err(e) => {
+                                        log::error!("{:?}", e);
 
-                                    // https://stackoverflow.com/questions/66450942/in-rust-is-there-a-way-to-make-literal-newlines-in-r-using-windows-c
-                                    let stringified_error =
-                                        format!("{:?}", e).replace("\n", "\n\r");
+                                        // https://stackoverflow.com/questions/66450942/in-rust-is-there-a-way-to-make-literal-newlines-in-r-using-windows-c
+                                        let stringified_error =
+                                            format!("{:?}", e).replace("\n", "\n\r");
 
-                                    handle_plugin_crash(
-                                        plugin_id,
-                                        stringified_error,
-                                        senders.clone(),
-                                    );
-                                },
+                                        handle_plugin_crash(
+                                            *plugin_id,
+                                            stringified_error,
+                                            senders.clone(),
+                                        );
+                                    },
+                                }
                             }
                         }
-                    });
+                    }
                 }
             }
+        });
+        // loop once more to update the cached events for the pending plugins (probably currently
+        // being loaded, we'll send them these events when they load)
+        for (pid, _cid, event) in updates.drain(..) {
             for (plugin_id, cached_events) in self.cached_events_for_pending_plugins.iter_mut() {
                 if pid.is_none() || pid.as_ref() == Some(plugin_id) {
                     cached_events.push(EventOrPipeMessage::Event(event.clone()));
@@ -830,6 +843,7 @@ impl WasmBridge {
                                                     &mut running_plugin,
                                                     &event,
                                                     &mut plugin_render_assets,
+                                                    senders.clone(),
                                                 ) {
                                                     Ok(()) => {
                                                         let _ = senders.send_to_screen(
@@ -1261,6 +1275,7 @@ pub fn apply_event_to_plugin(
     running_plugin: &mut RunningPlugin,
     event: &Event,
     plugin_render_assets: &mut Vec<PluginRenderAsset>,
+    senders: ThreadSenders,
 ) -> Result<()> {
     let instance = &running_plugin.instance;
     let plugin_env = &running_plugin.plugin_env;
@@ -1315,6 +1330,17 @@ pub fn apply_event_to_plugin(
                 )
                 .with_pipes(pipes_to_block_or_unblock);
                 plugin_render_assets.push(plugin_render_asset);
+            } else {
+                // This is a bit of a hack to get around the fact that plugins are allowed not to
+                // render and still unblock CLI pipes
+                let pipes_to_block_or_unblock = pipes_to_block_or_unblock(running_plugin, None);
+                let plugin_render_asset = PluginRenderAsset::new(plugin_id, client_id, vec![])
+                    .with_pipes(pipes_to_block_or_unblock);
+                let _ = senders
+                    .send_to_plugin(PluginInstruction::UnblockCliPipes(vec![
+                        plugin_render_asset,
+                    ]))
+                    .context("failed to unblock input pipe");
             }
         },
         (PermissionStatus::Denied, permission) => {

@@ -3,6 +3,7 @@ pub mod os_input_output;
 pub mod cli_client;
 mod command_is_executing;
 mod input_handler;
+mod keyboard_parser;
 pub mod old_config_converter;
 mod stdin_ansi_parser;
 mod stdin_handler;
@@ -24,11 +25,12 @@ use crate::{
 use zellij_utils::{
     channels::{self, ChannelWithContext, SenderWithContext},
     consts::{set_permissions, ZELLIJ_SOCK_DIR},
-    data::{ClientId, ConnectToSession, InputMode, Style},
+    data::{ClientId, ConnectToSession, KeyWithModifier, Style},
     envs,
     errors::{ClientContext, ContextType, ErrorInstruction},
     input::{config::Config, options::Options},
     ipc::{ClientAttributes, ClientToServerMsg, ExitReason, ServerToClientMsg},
+    pane_size::Size,
     termwiz::input::InputEvent,
 };
 use zellij_utils::{cli::CliArgs, input::layout::Layout};
@@ -40,7 +42,6 @@ pub(crate) enum ClientInstruction {
     Render(String),
     UnblockInputThread,
     Exit(ExitReason),
-    SwitchToMode(InputMode),
     Connected,
     ActiveClients(Vec<ClientId>),
     StartedParsingStdinQuery,
@@ -51,6 +52,7 @@ pub(crate) enum ClientInstruction {
     SetSynchronizedOutput(Option<SyncOutput>),
     UnblockCliPipeInput(String),   // String -> pipe name
     CliPipeOutput(String, String), // String -> pipe name, String -> output
+    QueryTerminalSize,
 }
 
 impl From<ServerToClientMsg> for ClientInstruction {
@@ -59,9 +61,6 @@ impl From<ServerToClientMsg> for ClientInstruction {
             ServerToClientMsg::Exit(e) => ClientInstruction::Exit(e),
             ServerToClientMsg::Render(buffer) => ClientInstruction::Render(buffer),
             ServerToClientMsg::UnblockInputThread => ClientInstruction::UnblockInputThread,
-            ServerToClientMsg::SwitchToMode(input_mode) => {
-                ClientInstruction::SwitchToMode(input_mode)
-            },
             ServerToClientMsg::Connected => ClientInstruction::Connected,
             ServerToClientMsg::ActiveClients(clients) => ClientInstruction::ActiveClients(clients),
             ServerToClientMsg::Log(log_lines) => ClientInstruction::Log(log_lines),
@@ -75,6 +74,7 @@ impl From<ServerToClientMsg> for ClientInstruction {
             ServerToClientMsg::CliPipeOutput(pipe_name, output) => {
                 ClientInstruction::CliPipeOutput(pipe_name, output)
             },
+            ServerToClientMsg::QueryTerminalSize => ClientInstruction::QueryTerminalSize,
         }
     }
 }
@@ -86,7 +86,6 @@ impl From<&ClientInstruction> for ClientContext {
             ClientInstruction::Error(_) => ClientContext::Error,
             ClientInstruction::Render(_) => ClientContext::Render,
             ClientInstruction::UnblockInputThread => ClientContext::UnblockInputThread,
-            ClientInstruction::SwitchToMode(_) => ClientContext::SwitchToMode,
             ClientInstruction::Connected => ClientContext::Connected,
             ClientInstruction::ActiveClients(_) => ClientContext::ActiveClients,
             ClientInstruction::Log(_) => ClientContext::Log,
@@ -97,6 +96,7 @@ impl From<&ClientInstruction> for ClientContext {
             ClientInstruction::SetSynchronizedOutput(..) => ClientContext::SetSynchronisedOutput,
             ClientInstruction::UnblockCliPipeInput(..) => ClientContext::UnblockCliPipeInput,
             ClientInstruction::CliPipeOutput(..) => ClientContext::CliPipeOutput,
+            ClientInstruction::QueryTerminalSize => ClientContext::QueryTerminalSize,
         }
     }
 }
@@ -148,7 +148,7 @@ impl ClientInfo {
 #[derive(Debug, Clone)]
 pub(crate) enum InputInstruction {
     KeyEvent(InputEvent, Vec<u8>),
-    SwitchToMode(InputMode),
+    KeyWithModifierEvent(KeyWithModifier, Vec<u8>),
     AnsiStdinInstructions(Vec<AnsiStdinInstruction>),
     StartedParsing,
     DoneParsing,
@@ -165,19 +165,29 @@ pub fn start_client(
     tab_position_to_focus: Option<usize>,
     pane_id_to_focus: Option<(u32, bool)>, // (pane_id, is_plugin)
     is_a_reconnect: bool,
+    start_detached_and_exit: bool,
 ) -> Option<ConnectToSession> {
+    if start_detached_and_exit {
+        start_server_detached(os_input, opts, config, config_options, info, layout);
+        return None;
+    }
     info!("Starting Zellij client!");
 
+    let explicitly_disable_kitty_keyboard_protocol = config_options
+        .support_kitty_keyboard_protocol
+        .map(|e| !e)
+        .unwrap_or(false);
     let mut reconnect_to_session = None;
     let clear_client_terminal_attributes = "\u{1b}[?1l\u{1b}=\u{1b}[r\u{1b}[?1000l\u{1b}[?1002l\u{1b}[?1003l\u{1b}[?1005l\u{1b}[?1006l\u{1b}[?12l";
     let take_snapshot = "\u{1b}[?1049h";
     let bracketed_paste = "\u{1b}[?2004h";
+    let enter_kitty_keyboard_mode = "\u{1b}[>1u";
     os_input.unset_raw_mode(0).unwrap();
 
     if !is_a_reconnect {
         // we don't do this for a reconnect because our controlling terminal already has the
         // attributes we want from it, and some terminals don't treat these atomically (looking at
-        // your Windows Terminal...)
+        // you Windows Terminal...)
         let _ = os_input
             .get_stdout_writer()
             .write(take_snapshot.as_bytes())
@@ -186,6 +196,12 @@ pub fn start_client(
             .get_stdout_writer()
             .write(clear_client_terminal_attributes.as_bytes())
             .unwrap();
+        if !explicitly_disable_kitty_keyboard_protocol {
+            let _ = os_input
+                .get_stdout_writer()
+                .write(enter_kitty_keyboard_mode.as_bytes())
+                .unwrap();
+        }
     }
     envs::set_zellij("0".to_string());
     config.env.set_vars();
@@ -290,7 +306,14 @@ pub fn start_client(
             let os_input = os_input.clone();
             let send_input_instructions = send_input_instructions.clone();
             let stdin_ansi_parser = stdin_ansi_parser.clone();
-            move || stdin_loop(os_input, send_input_instructions, stdin_ansi_parser)
+            move || {
+                stdin_loop(
+                    os_input,
+                    send_input_instructions,
+                    stdin_ansi_parser,
+                    explicitly_disable_kitty_keyboard_protocol,
+                )
+            }
         });
 
     let _input_thread = thread::Builder::new()
@@ -476,11 +499,6 @@ pub fn start_client(
             ClientInstruction::UnblockInputThread => {
                 command_is_executing.unblock_input_thread();
             },
-            ClientInstruction::SwitchToMode(input_mode) => {
-                send_input_instructions
-                    .send(InputInstruction::SwitchToMode(input_mode))
-                    .unwrap();
-            },
             ClientInstruction::Log(lines_to_log) => {
                 for line in lines_to_log {
                     log::info!("{line}");
@@ -498,6 +516,11 @@ pub fn start_client(
             },
             ClientInstruction::SetSynchronizedOutput(enabled) => {
                 synchronised_output = enabled;
+            },
+            ClientInstruction::QueryTerminalSize => {
+                os_input.send_to_server(ClientToServerMsg::TerminalResize(
+                    os_input.get_terminal_size_using_fd(0),
+                ));
             },
             _ => {},
         }
@@ -519,6 +542,11 @@ pub fn start_client(
         info!("{}", exit_msg);
         os_input.unset_raw_mode(0).unwrap();
         let mut stdout = os_input.get_stdout_writer();
+        let exit_kitty_keyboard_mode = "\u{1b}[<1u";
+        if !explicitly_disable_kitty_keyboard_protocol {
+            let _ = stdout.write(exit_kitty_keyboard_mode.as_bytes()).unwrap();
+            stdout.flush().unwrap();
+        }
         let _ = stdout.write(goodbye_message.as_bytes()).unwrap();
         stdout.flush().unwrap();
     } else {
@@ -533,6 +561,65 @@ pub fn start_client(
     reconnect_to_session
 }
 
-#[cfg(test)]
-#[path = "./unit/stdin_tests.rs"]
-mod stdin_tests;
+pub fn start_server_detached(
+    mut os_input: Box<dyn ClientOsApi>,
+    opts: CliArgs,
+    config: Config,
+    config_options: Options,
+    info: ClientInfo,
+    layout: Option<Layout>,
+) {
+    envs::set_zellij("0".to_string());
+    config.env.set_vars();
+
+    let palette = config
+        .theme_config(&config_options)
+        .unwrap_or_else(|| os_input.load_palette());
+
+    let client_attributes = ClientAttributes {
+        size: Size { rows: 50, cols: 50 }, // just so size is not 0, it doesn't matter because we
+        // immediately detach
+        style: Style {
+            colors: palette,
+            rounded_corners: config.ui.pane_frames.rounded_corners,
+            hide_session_name: config.ui.pane_frames.hide_session_name,
+        },
+        keybinds: config.keybinds.clone(),
+    };
+
+    let create_ipc_pipe = || -> std::path::PathBuf {
+        let mut sock_dir = ZELLIJ_SOCK_DIR.clone();
+        std::fs::create_dir_all(&sock_dir).unwrap();
+        set_permissions(&sock_dir, 0o700).unwrap();
+        sock_dir.push(envs::get_session_name().unwrap());
+        sock_dir
+    };
+
+    let (first_msg, ipc_pipe) = match info {
+        ClientInfo::New(name) | ClientInfo::Resurrect(name, _) => {
+            envs::set_session_name(name.clone());
+            os_input.update_session_name(name);
+            let ipc_pipe = create_ipc_pipe();
+
+            spawn_server(&*ipc_pipe, opts.debug).unwrap();
+
+            (
+                ClientToServerMsg::NewClient(
+                    client_attributes,
+                    Box::new(opts),
+                    Box::new(config_options.clone()),
+                    Box::new(layout.unwrap()),
+                    Box::new(config.plugins.clone()),
+                ),
+                ipc_pipe,
+            )
+        },
+        _ => {
+            eprintln!("Session already exists");
+            std::process::exit(1);
+        },
+    };
+
+    os_input.connect_to_server(&*ipc_pipe);
+    os_input.send_to_server(first_msg);
+}

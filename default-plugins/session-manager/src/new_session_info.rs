@@ -1,6 +1,6 @@
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use std::cmp::Ordering;
+use std::path::PathBuf;
 use zellij_tile::prelude::*;
 
 #[derive(Default)]
@@ -8,6 +8,7 @@ pub struct NewSessionInfo {
     name: String,
     layout_list: LayoutList,
     entering_new_session_info: EnteringState,
+    pub new_session_folder: Option<PathBuf>,
 }
 
 #[derive(Eq, PartialEq)]
@@ -28,9 +29,6 @@ impl NewSessionInfo {
     }
     pub fn layout_search_term(&self) -> &str {
         &self.layout_list.layout_search_term
-    }
-    pub fn entering_new_session_info(&self) -> bool {
-        true
     }
     pub fn entering_new_session_name(&self) -> bool {
         self.entering_new_session_info == EnteringState::EnteringName
@@ -72,21 +70,24 @@ impl NewSessionInfo {
             },
         }
     }
-    pub fn handle_key(&mut self, key: Key) {
-        match key {
-            Key::Backspace => {
+    pub fn handle_key(&mut self, key: KeyWithModifier) {
+        match key.bare_key {
+            BareKey::Backspace if key.has_no_modifiers() => {
                 self.handle_backspace();
             },
-            Key::Ctrl('c') | Key::Esc => {
+            BareKey::Char('c') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
                 self.handle_break();
             },
-            Key::Char(character) => {
+            BareKey::Esc if key.has_no_modifiers() => {
+                self.handle_break();
+            },
+            BareKey::Char(character) if key.has_no_modifiers() => {
                 self.add_char(character);
             },
-            Key::Up => {
+            BareKey::Up if key.has_no_modifiers() => {
                 self.move_selection_up();
             },
-            Key::Down => {
+            BareKey::Down if key.has_no_modifiers() => {
                 self.move_selection_down();
             },
             _ => {},
@@ -104,7 +105,8 @@ impl NewSessionInfo {
                 if new_session_name != current_session_name.as_ref().map(|s| s.as_str()) {
                     match new_session_layout {
                         Some(new_session_layout) => {
-                            switch_session_with_layout(new_session_name, new_session_layout, None)
+                            let cwd = self.new_session_folder.as_ref().map(|c| PathBuf::from(c));
+                            switch_session_with_layout(new_session_name, new_session_layout, cwd)
                         },
                         None => {
                             switch_session(new_session_name);
@@ -123,21 +125,28 @@ impl NewSessionInfo {
     pub fn update_layout_list(&mut self, layout_info: Vec<LayoutInfo>) {
         self.layout_list.update_layout_list(layout_info);
     }
-    pub fn layout_list(&self) -> Vec<(LayoutInfo, bool)> {
+    pub fn layout_list(&self, max_rows: usize) -> Vec<(LayoutInfo, bool)> {
         // bool - is_selected
+        let range_to_render = self.range_to_render(
+            max_rows,
+            self.layout_count(),
+            Some(self.layout_list.selected_layout_index),
+        );
         self.layout_list
             .layout_list
             .iter()
             .enumerate()
             .map(|(i, l)| (l.clone(), i == self.layout_list.selected_layout_index))
+            .take(range_to_render.1)
+            .skip(range_to_render.0)
             .collect()
     }
-    pub fn layouts_to_render(&self) -> Vec<(LayoutInfo, Vec<usize>, bool)> {
+    pub fn layouts_to_render(&self, max_rows: usize) -> Vec<(LayoutInfo, Vec<usize>, bool)> {
         // (layout_info,
         // search_indices,
         // is_selected)
         if self.is_searching() {
-            self.layout_search_results()
+            self.layout_search_results(max_rows)
                 .into_iter()
                 .map(|(layout_search_result, is_selected)| {
                     (
@@ -148,20 +157,47 @@ impl NewSessionInfo {
                 })
                 .collect()
         } else {
-            self.layout_list()
+            self.layout_list(max_rows)
                 .into_iter()
                 .map(|(layout_info, is_selected)| (layout_info, vec![], is_selected))
                 .collect()
         }
     }
-    pub fn layout_search_results(&self) -> Vec<(LayoutSearchResult, bool)> {
+    pub fn layout_search_results(&self, max_rows: usize) -> Vec<(LayoutSearchResult, bool)> {
         // bool - is_selected
+        let range_to_render = self.range_to_render(
+            max_rows,
+            self.layout_list.layout_search_results.len(),
+            Some(self.layout_list.selected_layout_index),
+        );
         self.layout_list
             .layout_search_results
             .iter()
             .enumerate()
             .map(|(i, l)| (l.clone(), i == self.layout_list.selected_layout_index))
+            .take(range_to_render.1)
+            .skip(range_to_render.0)
             .collect()
+    }
+    // TODO: merge with similar function in resurrectable_sessions
+    fn range_to_render(
+        &self,
+        table_rows: usize,
+        results_len: usize,
+        selected_index: Option<usize>,
+    ) -> (usize, usize) {
+        if table_rows <= results_len {
+            let row_count_to_render = table_rows.saturating_sub(1); // 1 for the title
+            let first_row_index_to_render = selected_index
+                .unwrap_or(0)
+                .saturating_sub(row_count_to_render / 2);
+            let last_row_index_to_render = first_row_index_to_render + row_count_to_render;
+            (first_row_index_to_render, last_row_index_to_render)
+        } else {
+            let first_row_index_to_render = 0;
+            let last_row_index_to_render = results_len;
+            (first_row_index_to_render, last_row_index_to_render)
+        }
     }
     pub fn is_searching(&self) -> bool {
         !self.layout_list.layout_search_term.is_empty()

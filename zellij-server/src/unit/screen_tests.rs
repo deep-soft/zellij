@@ -70,6 +70,7 @@ fn take_snapshots_and_cursor_coordinates_from_render_events<'a>(
     let debug = false;
     let arrow_fonts = true;
     let styled_underlines = true;
+    let explicitly_disable_kitty_keyboard_protocol = false;
     let mut grid = Grid::new(
         screen_size.rows,
         screen_size.cols,
@@ -82,6 +83,7 @@ fn take_snapshots_and_cursor_coordinates_from_render_events<'a>(
         debug,
         arrow_fonts,
         styled_underlines,
+        explicitly_disable_kitty_keyboard_protocol,
     );
     let snapshots: Vec<(Option<(usize, usize)>, String)> = all_events
         .filter_map(|server_instruction| {
@@ -252,6 +254,7 @@ fn create_new_screen(size: Size) -> Screen {
     let debug = false;
     let styled_underlines = true;
     let arrow_fonts = true;
+    let explicitly_disable_kitty_keyboard_protocol = false;
     let screen = Screen::new(
         bus,
         &client_attributes,
@@ -271,6 +274,7 @@ fn create_new_screen(size: Size) -> Screen {
         styled_underlines,
         arrow_fonts,
         layout_dir,
+        explicitly_disable_kitty_keyboard_protocol,
     );
     screen
 }
@@ -510,6 +514,8 @@ impl MockScreen {
             background_jobs_thread: None,
             config_options: Default::default(),
             layout,
+            client_input_modes: HashMap::new(),
+            client_keybinds: HashMap::new(),
         }
     }
 }
@@ -567,6 +573,8 @@ impl MockScreen {
             background_jobs_thread: None,
             config_options: Default::default(),
             layout,
+            client_input_modes: HashMap::new(),
+            client_keybinds: HashMap::new(),
         };
 
         let os_input = FakeInputOutput::default();
@@ -2445,31 +2453,41 @@ pub fn send_cli_edit_action_with_split_direction() {
 
 #[test]
 pub fn send_cli_switch_mode_action() {
-    let size = Size {
-        cols: 121,
-        rows: 20,
-    };
+    let size = Size { cols: 80, rows: 10 };
     let client_id = 10; // fake client id should not appear in the screen's state
-    let mut mock_screen = MockScreen::new(size);
-    let session_metadata = mock_screen.clone_session_metadata();
     let mut initial_layout = TiledPaneLayout::default();
     initial_layout.children_split_direction = SplitDirection::Vertical;
     initial_layout.children = vec![TiledPaneLayout::default(), TiledPaneLayout::default()];
+    let mut mock_screen = MockScreen::new(size);
+    let session_metadata = mock_screen.clone_session_metadata();
     let screen_thread = mock_screen.run(Some(initial_layout), vec![]);
+    let received_server_instructions = Arc::new(Mutex::new(vec![]));
+    let server_receiver = mock_screen.server_receiver.take().unwrap();
+    let server_instruction = log_actions_in_thread!(
+        received_server_instructions,
+        ServerInstruction::KillSession,
+        server_receiver
+    );
+
     let cli_switch_mode = CliAction::SwitchMode {
         input_mode: InputMode::Locked,
     };
     send_cli_action_to_server(&session_metadata, cli_switch_mode, client_id);
-    std::thread::sleep(std::time::Duration::from_millis(100)); // give time for actions to be
-    mock_screen.teardown(vec![screen_thread]);
-    assert_snapshot!(format!(
-        "{:?}",
-        *mock_screen
-            .os_input
-            .server_to_client_messages
-            .lock()
-            .unwrap()
-    ));
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    mock_screen.teardown(vec![server_instruction, screen_thread]);
+
+    let switch_mode_action = received_server_instructions
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|instruction| match instruction {
+            ServerInstruction::ChangeModeForAllClients(..) => true,
+            _ => false,
+        })
+        .cloned();
+
+    assert_snapshot!(format!("{:?}", switch_mode_action));
 }
 
 #[test]

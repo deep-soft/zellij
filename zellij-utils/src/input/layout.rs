@@ -8,6 +8,8 @@
 //  place.
 //  If plugins should be able to depend on the layout system
 //  then [`zellij-utils`] could be a proper place.
+#[cfg(not(target_family = "wasm"))]
+use crate::downloader::Downloader;
 use crate::{
     data::{Direction, LayoutInfo},
     home::{default_layout_dir, find_default_config_dir},
@@ -18,6 +20,8 @@ use crate::{
     pane_size::{Constraint, Dimension, PaneGeom},
     setup::{self},
 };
+#[cfg(not(target_family = "wasm"))]
+use async_std::task;
 
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
@@ -425,12 +429,18 @@ impl RunPlugin {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Hash, Default, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Hash, Default, Eq)]
 pub struct PluginAlias {
     pub name: String,
     pub configuration: Option<PluginUserConfiguration>,
     pub initial_cwd: Option<PathBuf>,
     pub run_plugin: Option<RunPlugin>,
+}
+
+impl PartialEq for PluginAlias {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.configuration == other.configuration
+    }
 }
 
 impl PluginAlias {
@@ -446,6 +456,27 @@ impl PluginAlias {
                 .map(|c| PluginUserConfiguration::new(c.clone())),
             initial_cwd,
             ..Default::default()
+        }
+    }
+    pub fn set_caller_cwd_if_not_set(&mut self, caller_cwd: Option<PathBuf>) {
+        // we do this only for an alias because in all other cases this will be handled by the
+        // "cwd" configuration key above
+        // for an alias we might have cases where the cwd is defined on the alias but we still
+        // want to pass the "caller" cwd for the plugin the alias resolves into (eg. a
+        // filepicker that has access to the whole filesystem but wants to start in a specific
+        // folder)
+        if let Some(caller_cwd) = caller_cwd {
+            if self
+                .configuration
+                .as_ref()
+                .map(|c| c.inner().get("caller_cwd").is_none())
+                .unwrap_or(true)
+            {
+                let configuration = self
+                    .configuration
+                    .get_or_insert_with(|| PluginUserConfiguration::new(BTreeMap::new()));
+                configuration.insert("caller_cwd", caller_cwd.display().to_string());
+            }
         }
     }
 }
@@ -563,7 +594,7 @@ impl RunPluginLocation {
         match self {
             RunPluginLocation::File(pathbuf) => format!("file:{}", pathbuf.display()),
             RunPluginLocation::Zellij(plugin_tag) => format!("zellij:{}", plugin_tag),
-            RunPluginLocation::Remote(url) => format!("remote:{}", url),
+            RunPluginLocation::Remote(url) => String::from(url),
         }
     }
 }
@@ -576,7 +607,7 @@ impl From<&RunPluginLocation> for Url {
                 path.clone().into_os_string().into_string().unwrap()
             ),
             RunPluginLocation::Zellij(tag) => format!("zellij:{}", tag),
-            RunPluginLocation::Remote(url) => format!("remote:{}", url),
+            RunPluginLocation::Remote(url) => String::from(url),
         };
         Self::parse(&url).unwrap()
     }
@@ -820,6 +851,7 @@ impl TiledPaneLayout {
         &self,
         space: &PaneGeom,
         max_panes: Option<usize>,
+        ignore_percent_split_sizes: bool,
     ) -> Result<Vec<(TiledPaneLayout, PaneGeom)>, &'static str> {
         let layouts = match max_panes {
             Some(max_panes) => {
@@ -845,9 +877,9 @@ impl TiledPaneLayout {
                     layout_to_split.focus_deepest_pane();
                 }
 
-                split_space(space, &layout_to_split, space)?
+                split_space(space, &layout_to_split, space, ignore_percent_split_sizes)?
             },
-            None => split_space(space, self, space)?,
+            None => split_space(space, self, space, ignore_percent_split_sizes)?,
         };
         for (_pane_layout, pane_geom) in layouts.iter() {
             if !pane_geom.is_at_least_minimum_size() {
@@ -1047,7 +1079,6 @@ impl Default for LayoutParts {
 }
 
 impl Layout {
-    // the first layout will either be the default one
     pub fn list_available_layouts(
         layout_dir: Option<PathBuf>,
         default_layout_name: &Option<String>,
@@ -1103,6 +1134,32 @@ impl Layout {
         });
         available_layouts
     }
+    pub fn from_layout_info(
+        layout_dir: &Option<PathBuf>,
+        layout_info: LayoutInfo,
+    ) -> Result<Layout, ConfigError> {
+        let (path_to_raw_layout, raw_layout, raw_swap_layouts) = match layout_info {
+            LayoutInfo::File(layout_name_without_extension) => {
+                let layout_dir = layout_dir.clone().or_else(|| default_layout_dir());
+                Self::stringified_from_dir(
+                    &PathBuf::from(layout_name_without_extension),
+                    layout_dir.as_ref(),
+                )?
+            },
+            LayoutInfo::BuiltIn(layout_name) => {
+                Self::stringified_from_default_assets(&PathBuf::from(layout_name))?
+            },
+            LayoutInfo::Url(url) => (url.clone(), Self::stringified_from_url(&url)?, None),
+        };
+        Layout::from_kdl(
+            &raw_layout,
+            path_to_raw_layout,
+            raw_swap_layouts
+                .as_ref()
+                .map(|(r, f)| (r.as_str(), f.as_str())),
+            None,
+        )
+    }
     pub fn stringified_from_path_or_default(
         layout_path: Option<&PathBuf>,
         layout_dir: Option<PathBuf>,
@@ -1127,6 +1184,20 @@ impl Layout {
             ),
         }
     }
+    pub fn stringified_from_url(url: &str) -> Result<String, ConfigError> {
+        #[cfg(not(target_family = "wasm"))]
+        let raw_layout = task::block_on(async move {
+            let download = Downloader::download_without_cache(url).await;
+            match download {
+                Ok(stringified) => Ok(stringified),
+                Err(e) => Err(ConfigError::DownloadError(format!("{}", e))),
+            }
+        })?;
+        // silently fail - this should not happen in plugins and legacy architecture is hard
+        #[cfg(target_family = "wasm")]
+        let raw_layout = String::new();
+        Ok(raw_layout)
+    }
     pub fn from_path_or_default(
         layout_path: Option<&PathBuf>,
         layout_dir: Option<PathBuf>,
@@ -1144,6 +1215,25 @@ impl Layout {
         )?;
         let config = Config::from_kdl(&raw_layout, Some(config))?; // this merges the two config, with
         Ok((layout, config))
+    }
+    #[cfg(not(target_family = "wasm"))]
+    pub fn from_url(url: &str, config: Config) -> Result<(Layout, Config), ConfigError> {
+        let raw_layout = task::block_on(async move {
+            let download = Downloader::download_without_cache(url).await;
+            match download {
+                Ok(stringified) => Ok(stringified),
+                Err(e) => Err(ConfigError::DownloadError(format!("{}", e))),
+            }
+        })?;
+        let layout = Layout::from_kdl(&raw_layout, url.into(), None, None)?;
+        let config = Config::from_kdl(&raw_layout, Some(config))?; // this merges the two config, with
+        Ok((layout, config))
+    }
+    #[cfg(target_family = "wasm")]
+    pub fn from_url(url: &str, config: Config) -> Result<(Layout, Config), ConfigError> {
+        Err(ConfigError::DownloadError(format!(
+            "Unsupported platform, cannot download layout from the web"
+        )))
     }
     pub fn from_path_or_default_without_config(
         layout_path: Option<&PathBuf>,
@@ -1397,6 +1487,7 @@ fn split_space(
     space_to_split: &PaneGeom,
     layout: &TiledPaneLayout,
     total_space_to_split: &PaneGeom,
+    ignore_percent_split_sizes: bool,
 ) -> Result<Vec<(TiledPaneLayout, PaneGeom)>, &'static str> {
     let sizes: Vec<Option<SplitSize>> = if layout.children_are_stacked {
         let index_of_expanded_pane = layout.children.iter().position(|p| p.is_expanded_in_stack);
@@ -1411,6 +1502,15 @@ fn split_space(
             *last_size = None;
         }
         sizes
+    } else if ignore_percent_split_sizes {
+        layout
+            .children
+            .iter()
+            .map(|part| match part.split_size {
+                Some(SplitSize::Percent(_)) => None,
+                split_size => split_size,
+            })
+            .collect()
     } else {
         layout.children.iter().map(|part| part.split_size).collect()
     };
@@ -1510,8 +1610,12 @@ fn split_space(
     for (i, part) in layout.children.iter().enumerate() {
         let part_position_and_size = split_geom.get(i).unwrap();
         if !part.children.is_empty() {
-            let mut part_positions =
-                split_space(part_position_and_size, part, total_space_to_split)?;
+            let mut part_positions = split_space(
+                part_position_and_size,
+                part,
+                total_space_to_split,
+                ignore_percent_split_sizes,
+            )?;
             pane_positions.append(&mut part_positions);
         } else {
             let part = part.clone();

@@ -151,6 +151,16 @@ pub struct Options {
     /// The interval at which to serialize sessions for resurrection (in seconds)
     #[clap(long, value_parser)]
     pub serialization_interval: Option<u64>,
+
+    /// If true, will disable writing session metadata to disk
+    #[clap(long, value_parser)]
+    pub disable_session_metadata: Option<bool>,
+
+    /// Whether to enable support for the Kitty keyboard protocol (must also be supported by the
+    /// host terminal), defaults to true if the terminal supports it
+    #[clap(long, value_parser)]
+    #[serde(default)]
+    pub support_kitty_keyboard_protocol: Option<bool>,
 }
 
 #[derive(ArgEnum, Deserialize, Serialize, Debug, Clone, Copy, PartialEq)]
@@ -223,6 +233,12 @@ impl Options {
             .or(self.scrollback_lines_to_serialize);
         let styled_underlines = other.styled_underlines.or(self.styled_underlines);
         let serialization_interval = other.serialization_interval.or(self.serialization_interval);
+        let disable_session_metadata = other
+            .disable_session_metadata
+            .or(self.disable_session_metadata);
+        let support_kitty_keyboard_protocol = other
+            .support_kitty_keyboard_protocol
+            .or(self.support_kitty_keyboard_protocol);
 
         Options {
             simplified_ui,
@@ -250,6 +266,8 @@ impl Options {
             scrollback_lines_to_serialize,
             styled_underlines,
             serialization_interval,
+            disable_session_metadata,
+            support_kitty_keyboard_protocol,
         }
     }
 
@@ -302,6 +320,12 @@ impl Options {
             .or_else(|| self.scrollback_lines_to_serialize.clone());
         let styled_underlines = other.styled_underlines.or(self.styled_underlines);
         let serialization_interval = other.serialization_interval.or(self.serialization_interval);
+        let disable_session_metadata = other
+            .disable_session_metadata
+            .or(self.disable_session_metadata);
+        let support_kitty_keyboard_protocol = other
+            .support_kitty_keyboard_protocol
+            .or(self.support_kitty_keyboard_protocol);
 
         Options {
             simplified_ui,
@@ -329,6 +353,8 @@ impl Options {
             scrollback_lines_to_serialize,
             styled_underlines,
             serialization_interval,
+            disable_session_metadata,
+            support_kitty_keyboard_protocol,
         }
     }
 
@@ -393,6 +419,7 @@ impl From<CliOptions> for Options {
             scrollback_lines_to_serialize: opts.scrollback_lines_to_serialize,
             styled_underlines: opts.styled_underlines,
             serialization_interval: opts.serialization_interval,
+            support_kitty_keyboard_protocol: opts.support_kitty_keyboard_protocol,
             ..Default::default()
         }
     }

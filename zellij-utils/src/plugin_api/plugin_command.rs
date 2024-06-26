@@ -8,9 +8,9 @@ pub use super::generated_api::api::{
         FixedOrPercentValue as ProtobufFixedOrPercentValue,
         FloatingPaneCoordinates as ProtobufFloatingPaneCoordinates, HttpVerb as ProtobufHttpVerb,
         IdAndNewName, KillSessionsPayload, MessageToPluginPayload, MovePayload,
-        NewPluginArgs as ProtobufNewPluginArgs, OpenCommandPanePayload, OpenFilePayload,
-        PaneId as ProtobufPaneId, PaneType as ProtobufPaneType,
-        PluginCommand as ProtobufPluginCommand, PluginMessagePayload,
+        NewPluginArgs as ProtobufNewPluginArgs, NewTabsWithLayoutInfoPayload,
+        OpenCommandPanePayload, OpenFilePayload, PaneId as ProtobufPaneId,
+        PaneType as ProtobufPaneType, PluginCommand as ProtobufPluginCommand, PluginMessagePayload,
         RequestPluginPermissionPayload, ResizePayload, RunCommandPayload, SetTimeoutPayload,
         SubscribePayload, SwitchSessionPayload, SwitchTabToPayload, UnsubscribePayload,
         WebRequestPayload,
@@ -855,7 +855,44 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                 Some(Payload::KillSessionsPayload(KillSessionsPayload { session_names })) => {
                     Ok(PluginCommand::KillSessions(session_names))
                 },
-                _ => Err("Mismatched payload for PipeOutput"),
+                _ => Err("Mismatched payload for KillSessions"),
+            },
+            Some(CommandName::ScanHostFolder) => match protobuf_plugin_command.payload {
+                Some(Payload::ScanHostFolderPayload(folder_to_scan)) => {
+                    Ok(PluginCommand::ScanHostFolder(PathBuf::from(folder_to_scan)))
+                },
+                _ => Err("Mismatched payload for ScanHostFolder"),
+            },
+            Some(CommandName::WatchFilesystem) => match protobuf_plugin_command.payload {
+                Some(_) => Err("WatchFilesystem should have no payload, found a payload"),
+                None => Ok(PluginCommand::WatchFilesystem),
+            },
+            Some(CommandName::DumpSessionLayout) => match protobuf_plugin_command.payload {
+                Some(_) => Err("DumpSessionLayout should have no payload, found a payload"),
+                None => Ok(PluginCommand::DumpSessionLayout),
+            },
+            Some(CommandName::CloseSelf) => match protobuf_plugin_command.payload {
+                Some(_) => Err("CloseSelf should have no payload, found a payload"),
+                None => Ok(PluginCommand::CloseSelf),
+            },
+            Some(CommandName::NewTabsWithLayoutInfo) => match protobuf_plugin_command.payload {
+                Some(Payload::NewTabsWithLayoutInfoPayload(new_tabs_with_layout_info_payload)) => {
+                    new_tabs_with_layout_info_payload
+                        .layout_info
+                        .and_then(|layout_info| {
+                            Some(PluginCommand::NewTabsWithLayoutInfo(
+                                layout_info.try_into().ok()?,
+                            ))
+                        })
+                        .ok_or("Failed to parse NewTabsWithLayoutInfo command")
+                },
+                _ => Err("Mismatched payload for NewTabsWithLayoutInfo"),
+            },
+            Some(CommandName::RebindKeys) => match protobuf_plugin_command.payload {
+                Some(Payload::RebindKeysPayload(rebind_keys_payload)) => {
+                    Ok(PluginCommand::RebindKeys(rebind_keys_payload))
+                },
+                _ => Err("Mismatched payload for RebindKeys"),
             },
             None => Err("Unrecognized plugin command"),
         }
@@ -1360,6 +1397,38 @@ impl TryFrom<PluginCommand> for ProtobufPluginCommand {
                 payload: Some(Payload::KillSessionsPayload(KillSessionsPayload {
                     session_names,
                 })),
+            }),
+            PluginCommand::ScanHostFolder(folder_to_scan) => Ok(ProtobufPluginCommand {
+                name: CommandName::ScanHostFolder as i32,
+                payload: Some(Payload::ScanHostFolderPayload(
+                    folder_to_scan.display().to_string(),
+                )),
+            }),
+            PluginCommand::WatchFilesystem => Ok(ProtobufPluginCommand {
+                name: CommandName::WatchFilesystem as i32,
+                payload: None,
+            }),
+            PluginCommand::DumpSessionLayout => Ok(ProtobufPluginCommand {
+                name: CommandName::DumpSessionLayout as i32,
+                payload: None,
+            }),
+            PluginCommand::CloseSelf => Ok(ProtobufPluginCommand {
+                name: CommandName::CloseSelf as i32,
+                payload: None,
+            }),
+            PluginCommand::NewTabsWithLayoutInfo(new_tabs_with_layout_info_payload) => {
+                Ok(ProtobufPluginCommand {
+                    name: CommandName::NewTabsWithLayoutInfo as i32,
+                    payload: Some(Payload::NewTabsWithLayoutInfoPayload(
+                        NewTabsWithLayoutInfoPayload {
+                            layout_info: new_tabs_with_layout_info_payload.try_into().ok(),
+                        },
+                    )),
+                })
+            },
+            PluginCommand::RebindKeys(rebind_keys_payload) => Ok(ProtobufPluginCommand {
+                name: CommandName::RebindKeys as i32,
+                payload: Some(Payload::RebindKeysPayload(rebind_keys_payload)),
             }),
         }
     }

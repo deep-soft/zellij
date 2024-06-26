@@ -84,6 +84,7 @@ static DEFAULT_SERIALIZATION_INTERVAL: u64 = 60000;
 pub(crate) fn background_jobs_main(
     bus: Bus<BackgroundJob>,
     serialization_interval: Option<u64>,
+    disable_session_metadata: bool,
 ) -> Result<()> {
     let err_context = || "failed to write to pty".to_string();
     let mut running_jobs: HashMap<BackgroundJob, Instant> = HashMap::new();
@@ -175,11 +176,13 @@ pub(crate) fn background_jobs_main(
                             let current_session_info = current_session_info.lock().unwrap().clone();
                             let current_session_layout =
                                 current_session_layout.lock().unwrap().clone();
-                            write_session_state_to_disk(
-                                current_session_name.clone(),
-                                current_session_info,
-                                current_session_layout,
-                            );
+                            if !disable_session_metadata {
+                                write_session_state_to_disk(
+                                    current_session_name.clone(),
+                                    current_session_info,
+                                    current_session_layout,
+                                );
+                            }
                             let session_infos_on_machine =
                                 read_other_live_session_states(&current_session_name);
                             let resurrectable_sessions =
@@ -433,10 +436,10 @@ fn find_resurrectable_sessions(
                     {
                         Ok(created) => Some(created),
                         Err(e) => {
-                            if e.kind() != std::io::ErrorKind::NotFound {
-                                // let's not spam the
-                                // logs if serialization
-                                // is disabled
+                            if e.kind() == std::io::ErrorKind::NotFound {
+                                return None; // no layout file, cannot resurrect session, let's not
+                                             // list it
+                            } else {
                                 log::error!(
                                     "Failed to read created stamp of resurrection file: {:?}",
                                     e

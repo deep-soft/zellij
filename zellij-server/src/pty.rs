@@ -2,7 +2,7 @@ use crate::background_jobs::BackgroundJob;
 use crate::terminal_bytes::TerminalBytes;
 use crate::{
     panes::PaneId,
-    plugins::PluginInstruction,
+    plugins::{PluginId, PluginInstruction},
     screen::ScreenInstruction,
     session_layout_metadata::SessionLayoutMetadata,
     thread_bus::{Bus, ThreadSenders},
@@ -18,10 +18,7 @@ use zellij_utils::{
     errors::{ContextType, PtyContext},
     input::{
         command::{RunCommand, TerminalAction},
-        layout::{
-            FloatingPaneLayout, Layout, PluginUserConfiguration, Run, RunPluginLocation,
-            RunPluginOrAlias, TiledPaneLayout,
-        },
+        layout::{FloatingPaneLayout, Layout, Run, RunPluginOrAlias, TiledPaneLayout},
     },
     pane_size::Size,
     session_serialization,
@@ -80,6 +77,7 @@ pub enum PtyInstruction {
         ClientTabIndexOrPaneId,
     ), // String is an optional pane name
     DumpLayout(SessionLayoutMetadata, ClientId),
+    DumpLayoutToPlugin(SessionLayoutMetadata, PluginId),
     LogLayoutToHd(SessionLayoutMetadata),
     FillPluginCwd(
         Option<bool>,   // should float
@@ -94,6 +92,7 @@ pub enum PtyInstruction {
         Option<PathBuf>, // if Some, will not fill cwd but just forward the message
         Option<FloatingPaneCoordinates>,
     ),
+    ListClientsMetadata(SessionLayoutMetadata, ClientId),
     Exit,
 }
 
@@ -113,8 +112,10 @@ impl From<&PtyInstruction> for PtyContext {
             PtyInstruction::DropToShellInPane { .. } => PtyContext::DropToShellInPane,
             PtyInstruction::SpawnInPlaceTerminal(..) => PtyContext::SpawnInPlaceTerminal,
             PtyInstruction::DumpLayout(..) => PtyContext::DumpLayout,
+            PtyInstruction::DumpLayoutToPlugin(..) => PtyContext::DumpLayoutToPlugin,
             PtyInstruction::LogLayoutToHd(..) => PtyContext::LogLayoutToHd,
             PtyInstruction::FillPluginCwd(..) => PtyContext::FillPluginCwd,
+            PtyInstruction::ListClientsMetadata(..) => PtyContext::ListClientsMetadata,
             PtyInstruction::Exit => PtyContext::Exit,
         }
     }
@@ -632,6 +633,33 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                             .non_fatal();
                     },
                 }
+            },
+            PtyInstruction::ListClientsMetadata(mut session_layout_metadata, client_id) => {
+                let err_context = || format!("Failed to dump layout");
+                pty.populate_session_layout_metadata(&mut session_layout_metadata);
+                pty.bus
+                    .senders
+                    .send_to_server(ServerInstruction::Log(
+                        vec![format!(
+                            "{}",
+                            session_layout_metadata.list_clients_metadata()
+                        )],
+                        client_id,
+                    ))
+                    .with_context(err_context)
+                    .non_fatal();
+            },
+            PtyInstruction::DumpLayoutToPlugin(mut session_layout_metadata, plugin_id) => {
+                let err_context = || format!("Failed to dump layout");
+                pty.populate_session_layout_metadata(&mut session_layout_metadata);
+                pty.bus
+                    .senders
+                    .send_to_plugin(PluginInstruction::DumpLayoutToPlugin(
+                        session_layout_metadata,
+                        plugin_id,
+                    ))
+                    .with_context(err_context)
+                    .non_fatal();
             },
             PtyInstruction::LogLayoutToHd(mut session_layout_metadata) => {
                 let err_context = || format!("Failed to dump layout");
@@ -1331,22 +1359,25 @@ impl Pty {
         session_layout_metadata.update_default_shell(get_default_shell());
         session_layout_metadata.update_terminal_commands(terminal_ids_to_commands);
         session_layout_metadata.update_terminal_cwds(terminal_ids_to_cwds);
+        session_layout_metadata.update_default_editor(&self.default_editor)
     }
     pub fn fill_plugin_cwd(
         &self,
         should_float: Option<bool>,
         should_open_in_place: bool, // should be opened in place
         pane_title: Option<String>, // pane title
-        run: RunPluginOrAlias,
+        mut run: RunPluginOrAlias,
         tab_index: usize,                   // tab index
         pane_id_to_replace: Option<PaneId>, // pane id to replace if this is to be opened "in-place"
         client_id: ClientId,
         size: Size,
         skip_cache: bool,
         cwd: Option<PathBuf>,
-        floating_pane_coordinates: Option<FloatingPaneCoordinates>,
+        // left here for historical and potential future reasons since we might change the ordering
+        // of the pipeline between threads and end up needing to forward this
+        _floating_pane_coordinates: Option<FloatingPaneCoordinates>,
     ) -> Result<()> {
-        let cwd = cwd.or_else(|| {
+        let get_focused_cwd = || {
             self.active_panes
                 .get(&client_id)
                 .and_then(|pane| match pane {
@@ -1359,8 +1390,14 @@ impl Pty {
                         .as_ref()
                         .and_then(|input| input.get_cwd(Pid::from_raw(id)))
                 })
-        });
+        };
 
+        let cwd = cwd.or_else(get_focused_cwd);
+
+        if let RunPluginOrAlias::Alias(alias) = &mut run {
+            let cwd = get_focused_cwd();
+            alias.set_caller_cwd_if_not_set(cwd);
+        }
         self.bus.senders.send_to_plugin(PluginInstruction::Load(
             should_float,
             should_open_in_place,

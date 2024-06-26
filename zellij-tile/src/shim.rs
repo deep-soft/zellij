@@ -249,6 +249,14 @@ pub fn show_self(should_float_if_hidden: bool) {
     unsafe { host_run_plugin_command() };
 }
 
+/// Close this plugin pane
+pub fn close_self() {
+    let plugin_command = PluginCommand::CloseSelf;
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
 /// Switch to the specified Input Mode (eg. `Normal`, `Tab`, `Pane`)
 pub fn switch_to_input_mode(mode: &InputMode) {
     let plugin_command = PluginCommand::SwitchToMode(*mode);
@@ -260,6 +268,14 @@ pub fn switch_to_input_mode(mode: &InputMode) {
 /// Provide a stringified [`layout`](https://zellij.dev/documentation/layouts.html) to be applied to the current session. If the layout has multiple tabs, they will all be opened.
 pub fn new_tabs_with_layout(layout: &str) {
     let plugin_command = PluginCommand::NewTabsWithLayout(layout.to_owned());
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+/// Provide a LayoutInfo to be applied to the current session in a new tab. If the layout has multiple tabs, they will all be opened.
+pub fn new_tabs_with_layout_info(layout_info: LayoutInfo) {
+    let plugin_command = PluginCommand::NewTabsWithLayoutInfo(layout_info);
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
     object_to_stdout(&protobuf_plugin_command.encode_to_vec());
     unsafe { host_run_plugin_command() };
@@ -761,6 +777,40 @@ where
 {
     let plugin_command =
         PluginCommand::KillSessions(session_names.into_iter().map(|s| s.to_string()).collect());
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+/// Scan a specific folder in the host filesystem (this is a hack around some WASI runtime performance
+/// issues), will not follow symlinks
+pub fn scan_host_folder<S: AsRef<Path>>(folder_to_scan: &S) {
+    let plugin_command = PluginCommand::ScanHostFolder(folder_to_scan.as_ref().to_path_buf());
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+/// Start watching the host folder for filesystem changes (Note: somewhat unstable at the time
+/// being)
+pub fn watch_filesystem() {
+    let plugin_command = PluginCommand::WatchFilesystem;
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+/// Get the serialized session layout in KDL format as a CustomMessage Event
+pub fn dump_session_layout() {
+    let plugin_command = PluginCommand::DumpSessionLayout;
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+/// Rebind keys for the current user
+pub fn rebind_keys(keys: String) {
+    let plugin_command = PluginCommand::RebindKeys(keys);
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
     object_to_stdout(&protobuf_plugin_command.encode_to_vec());
     unsafe { host_run_plugin_command() };

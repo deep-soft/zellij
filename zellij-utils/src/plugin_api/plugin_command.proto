@@ -93,6 +93,12 @@ enum CommandName {
   MessageToPlugin = 79;
   DisconnectOtherClients = 80;
   KillSessions = 81;
+  ScanHostFolder = 82;
+  WatchFilesystem = 83;
+  DumpSessionLayout = 84;
+  CloseSelf = 85;
+  NewTabsWithLayoutInfo = 86;
+  RebindKeys = 87;
 }
 
 message PluginCommand {
@@ -148,7 +154,14 @@ message PluginCommand {
     CliPipeOutputPayload cli_pipe_output_payload = 49;
     MessageToPluginPayload message_to_plugin_payload = 50;
     KillSessionsPayload kill_sessions_payload = 60;
+    string scan_host_folder_payload = 61;
+    NewTabsWithLayoutInfoPayload new_tabs_with_layout_info_payload = 62;
+    string rebind_keys_payload = 63;
   }
+}
+
+message NewTabsWithLayoutInfoPayload {
+  event.LayoutInfo layout_info = 1;
 }
 
 message KillSessionsPayload {

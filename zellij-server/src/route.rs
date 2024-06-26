@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 
 use crate::thread_bus::ThreadSenders;
@@ -10,6 +10,7 @@ use crate::{
     screen::ScreenInstruction,
     ServerInstruction, SessionMetaData, SessionState,
 };
+use uuid::Uuid;
 use zellij_utils::{
     channels::SenderWithContext,
     data::{Direction, Event, PluginCapabilities, ResizeStrategy},
@@ -63,12 +64,17 @@ pub(crate) fn route_action(
                 .send_to_screen(ScreenInstruction::ToggleTab(client_id))
                 .with_context(err_context)?;
         },
-        Action::Write(val) => {
+        Action::Write(key_with_modifier, raw_bytes, is_kitty_keyboard_protocol) => {
             senders
                 .send_to_screen(ScreenInstruction::ClearScroll(client_id))
                 .with_context(err_context)?;
             senders
-                .send_to_screen(ScreenInstruction::WriteCharacter(val, client_id))
+                .send_to_screen(ScreenInstruction::WriteCharacter(
+                    key_with_modifier,
+                    raw_bytes,
+                    is_kitty_keyboard_protocol,
+                    client_id,
+                ))
                 .with_context(err_context)?;
         },
         Action::WriteChars(val) => {
@@ -77,7 +83,9 @@ pub(crate) fn route_action(
                 .with_context(err_context)?;
             let val = val.into_bytes();
             senders
-                .send_to_screen(ScreenInstruction::WriteCharacter(val, client_id))
+                .send_to_screen(ScreenInstruction::WriteCharacter(
+                    None, val, false, client_id,
+                ))
                 .with_context(err_context)?;
         },
         Action::SwitchToMode(mode) => {
@@ -92,6 +100,9 @@ pub(crate) fn route_action(
                     Some(client_id),
                     Event::ModeUpdate(get_mode_info(mode, attrs, capabilities)),
                 )]))
+                .with_context(err_context)?;
+            senders
+                .send_to_server(ServerInstruction::ChangeMode(client_id, mode))
                 .with_context(err_context)?;
             senders
                 .send_to_screen(ScreenInstruction::ChangeMode(
@@ -336,6 +347,11 @@ pub(crate) fn route_action(
                     Event::ModeUpdate(get_mode_info(input_mode, attrs, capabilities)),
                 )]))
                 .with_context(err_context)?;
+
+            senders
+                .send_to_server(ServerInstruction::ChangeModeForAllClients(input_mode))
+                .with_context(err_context)?;
+
             senders
                 .send_to_screen(ScreenInstruction::ChangeModeForAllClients(get_mode_info(
                     input_mode,
@@ -883,6 +899,60 @@ pub(crate) fn route_action(
                 log::error!("Message must have a name");
             }
         },
+        Action::KeybindPipe {
+            mut name,
+            payload,
+            plugin,
+            args,
+            mut configuration,
+            floating,
+            in_place,
+            skip_cache,
+            cwd,
+            pane_title,
+            launch_new,
+            ..
+        } => {
+            if let Some(name) = name.take() {
+                let should_open_in_place = in_place.unwrap_or(false);
+                let pane_id_to_replace = if should_open_in_place { pane_id } else { None };
+                if launch_new {
+                    // we do this to make sure the plugin is unique (has a unique configuration parameter)
+                    configuration
+                        .get_or_insert_with(BTreeMap::new)
+                        .insert("_zellij_id".to_owned(), Uuid::new_v4().to_string());
+                }
+                senders
+                    .send_to_plugin(PluginInstruction::KeybindPipe {
+                        name,
+                        payload,
+                        plugin,
+                        args,
+                        configuration,
+                        floating,
+                        pane_id_to_replace,
+                        cwd,
+                        pane_title,
+                        skip_cache,
+                        cli_client_id: client_id,
+                    })
+                    .with_context(err_context)?;
+            } else {
+                log::error!("Message must have a name");
+            }
+        },
+        Action::ListClients => {
+            let default_shell = match default_shell {
+                Some(TerminalAction::RunCommand(run_command)) => Some(run_command.command),
+                _ => None,
+            };
+            senders
+                .send_to_screen(ScreenInstruction::ListClientsMetadata(
+                    default_shell,
+                    client_id,
+                ))
+                .with_context(err_context)?;
+        },
     }
     Ok(should_break)
 }
@@ -926,20 +996,42 @@ pub(crate) fn route_thread_main(
                  -> Result<bool> {
                     let mut should_break = false;
                     match instruction {
+                        ClientToServerMsg::Key(key, raw_bytes, is_kitty_keyboard_protocol) => {
+                            if let Some(rlocked_sessions) = rlocked_sessions.as_ref() {
+                                match rlocked_sessions.get_client_keybinds_and_mode(&client_id) {
+                                    Some((keybinds, input_mode)) => {
+                                        for action in keybinds
+                                            .get_actions_for_key_in_mode_or_default_action(
+                                                &input_mode,
+                                                &key,
+                                                raw_bytes,
+                                                is_kitty_keyboard_protocol,
+                                            )
+                                        {
+                                            if route_action(
+                                                action,
+                                                client_id,
+                                                None,
+                                                rlocked_sessions.senders.clone(),
+                                                rlocked_sessions.capabilities.clone(),
+                                                rlocked_sessions.client_attributes.clone(),
+                                                rlocked_sessions.default_shell.clone(),
+                                                rlocked_sessions.layout.clone(),
+                                                Some(&mut seen_cli_pipes),
+                                            )? {
+                                                should_break = true;
+                                            }
+                                        }
+                                    },
+                                    None => {
+                                        log::error!("Failed to get keybindings for client");
+                                    },
+                                }
+                            }
+                        },
                         ClientToServerMsg::Action(action, maybe_pane_id, maybe_client_id) => {
                             let client_id = maybe_client_id.unwrap_or(client_id);
                             if let Some(rlocked_sessions) = rlocked_sessions.as_ref() {
-                                if let Action::SwitchToMode(input_mode) = action {
-                                    let send_res = os_input.send_to_client(
-                                        client_id,
-                                        ServerToClientMsg::SwitchToMode(input_mode),
-                                    );
-                                    if send_res.is_err() {
-                                        let _ = to_server
-                                            .send(ServerInstruction::RemoveClient(client_id));
-                                        return Ok(true);
-                                    }
-                                }
                                 if route_action(
                                     action,
                                     client_id,

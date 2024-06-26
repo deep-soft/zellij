@@ -9,10 +9,11 @@ use std::time::Duration;
 
 use log::{debug, warn};
 use zellij_utils::data::{
-    Direction, PaneManifest, PluginPermission, Resize, ResizeStrategy, SessionInfo,
+    Direction, KeyWithModifier, PaneManifest, PluginPermission, Resize, ResizeStrategy, SessionInfo,
 };
 use zellij_utils::errors::prelude::*;
 use zellij_utils::input::command::RunCommand;
+use zellij_utils::input::keybinds::Keybinds;
 use zellij_utils::input::options::Clipboard;
 use zellij_utils::pane_size::{Size, SizeInPixels};
 use zellij_utils::{
@@ -20,8 +21,8 @@ use zellij_utils::{
     envs::set_session_name,
     input::command::TerminalAction,
     input::layout::{
-        FloatingPaneLayout, Layout, Run, RunPlugin, RunPluginLocation, RunPluginOrAlias,
-        SwapFloatingLayout, SwapTiledLayout, TiledPaneLayout,
+        FloatingPaneLayout, Layout, Run, RunPluginOrAlias, SwapFloatingLayout, SwapTiledLayout,
+        TiledPaneLayout,
     },
     position::Position,
 };
@@ -36,7 +37,7 @@ use crate::{
     output::Output,
     panes::sixel::SixelImageStore,
     panes::PaneId,
-    plugins::{PluginInstruction, PluginRenderAsset},
+    plugins::{PluginId, PluginInstruction, PluginRenderAsset},
     pty::{ClientTabIndexOrPaneId, PtyInstruction, VteBytes},
     tab::Tab,
     thread_bus::Bus,
@@ -116,7 +117,7 @@ macro_rules! active_tab_and_connected_client_id {
     ($screen:ident, $client_id:ident, $closure:expr, ?) => {
         match $screen.get_active_tab_mut($client_id) {
             Ok(active_tab) => {
-                $closure(active_tab, $client_id)?;
+                $closure(active_tab, $client_id).non_fatal();
             },
             Err(_) => {
                 if let Some(client_id) = $screen.get_first_client_id() {
@@ -158,7 +159,8 @@ pub enum ScreenInstruction {
     ToggleFloatingPanes(ClientId, Option<TerminalAction>),
     HorizontalSplit(PaneId, Option<InitialTitle>, HoldForCommand, ClientId),
     VerticalSplit(PaneId, Option<InitialTitle>, HoldForCommand, ClientId),
-    WriteCharacter(Vec<u8>, ClientId),
+    WriteCharacter(Option<KeyWithModifier>, Vec<u8>, bool, ClientId), // bool ->
+    // is_kitty_keyboard_protocol
     Resize(ClientId, ResizeStrategy),
     SwitchFocus(ClientId),
     FocusNextPane(ClientId),
@@ -180,6 +182,7 @@ pub enum ScreenInstruction {
     DumpScreen(String, ClientId, bool),
     DumpLayout(Option<PathBuf>, ClientId), // PathBuf is the default configured
     // shell
+    DumpLayoutToPlugin(PluginId),
     EditScrollback(ClientId),
     ScrollUp(ClientId),
     ScrollUpAt(Position, ClientId),
@@ -357,6 +360,8 @@ pub enum ScreenInstruction {
     ),
     DumpLayoutToHd,
     RenameSession(String, ClientId), // String -> new name
+    ListClientsMetadata(Option<PathBuf>, ClientId), // Option<PathBuf> - default shell
+    RebindKeys(Keybinds, ClientId),
 }
 
 impl From<&ScreenInstruction> for ScreenContext {
@@ -421,6 +426,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::ClearScreen(..) => ScreenContext::ClearScreen,
             ScreenInstruction::DumpScreen(..) => ScreenContext::DumpScreen,
             ScreenInstruction::DumpLayout(..) => ScreenContext::DumpLayout,
+            ScreenInstruction::DumpLayoutToPlugin(..) => ScreenContext::DumpLayoutToPlugin,
             ScreenInstruction::EditScrollback(..) => ScreenContext::EditScrollback,
             ScreenInstruction::ScrollUp(..) => ScreenContext::ScrollUp,
             ScreenInstruction::ScrollDown(..) => ScreenContext::ScrollDown,
@@ -539,6 +545,8 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::NewInPlacePluginPane(..) => ScreenContext::NewInPlacePluginPane,
             ScreenInstruction::DumpLayoutToHd => ScreenContext::DumpLayoutToHd,
             ScreenInstruction::RenameSession(..) => ScreenContext::RenameSession,
+            ScreenInstruction::ListClientsMetadata(..) => ScreenContext::ListClientsMetadata,
+            ScreenInstruction::RebindKeys(..) => ScreenContext::RebindKeys,
         }
     }
 }
@@ -617,6 +625,7 @@ pub(crate) struct Screen {
     arrow_fonts: bool,
     layout_dir: Option<PathBuf>,
     default_layout_name: Option<String>,
+    explicitly_disable_kitty_keyboard_protocol: bool,
 }
 
 impl Screen {
@@ -640,6 +649,7 @@ impl Screen {
         styled_underlines: bool,
         arrow_fonts: bool,
         layout_dir: Option<PathBuf>,
+        explicitly_disable_kitty_keyboard_protocol: bool,
     ) -> Self {
         let session_name = mode_info.session_name.clone().unwrap_or_default();
         let session_info = SessionInfo::new(session_name.clone());
@@ -680,6 +690,7 @@ impl Screen {
             arrow_fonts,
             resurrectable_sessions,
             layout_dir,
+            explicitly_disable_kitty_keyboard_protocol,
         }
     }
 
@@ -1030,15 +1041,19 @@ impl Screen {
     pub fn resize_to_screen(&mut self, new_screen_size: Size) -> Result<()> {
         let err_context = || format!("failed to resize to screen size: {new_screen_size:#?}");
 
-        self.size = new_screen_size;
-        for tab in self.tabs.values_mut() {
-            tab.resize_whole_tab(new_screen_size)
+        if self.size != new_screen_size {
+            self.size = new_screen_size;
+            for tab in self.tabs.values_mut() {
+                tab.resize_whole_tab(new_screen_size)
+                    .with_context(err_context)?;
+                tab.set_force_render();
+            }
+            self.log_and_report_session_state()
                 .with_context(err_context)?;
-            tab.set_force_render();
+            self.render(None).with_context(err_context)
+        } else {
+            Ok(())
         }
-        self.log_and_report_session_state()
-            .with_context(err_context)?;
-        self.render(None).with_context(err_context)
     }
 
     pub fn update_pixel_dimensions(&mut self, pixel_dimensions: PixelDimensions) {
@@ -1228,6 +1243,7 @@ impl Screen {
             self.debug,
             self.arrow_fonts,
             self.styled_underlines,
+            self.explicitly_disable_kitty_keyboard_protocol,
         );
         self.tabs.insert(tab_index, tab);
         Ok(())
@@ -1591,6 +1607,7 @@ impl Screen {
     }
 
     pub fn move_active_tab_to_left(&mut self, client_id: ClientId) -> Result<()> {
+        let err_context = || "Failed to move active tab left";
         if self.tabs.len() < 2 {
             debug!("cannot move tab to left: only one tab exists");
             return Ok(());
@@ -1598,18 +1615,22 @@ impl Screen {
         let Some(client_id) = self.client_id(client_id) else {
             return Ok(());
         };
-        let Some(&active_tab_idx) = self.active_tab_indices.get(&client_id) else {
-            return Ok(());
-        };
 
-        // wraps around: [tab1, tab2, tab3] => [tab1, tab2, tab3]
-        //                 ^                                 ^
-        //          active_tab_idx                     left_tab_idx
-        let left_tab_idx = (active_tab_idx + self.tabs.len() - 1) % self.tabs.len();
+        match self.get_active_tab(client_id) {
+            Ok(active_tab) => {
+                let active_tab_pos = active_tab.position;
+                let left_tab_pos = if active_tab_pos == 0 {
+                    self.tabs.len() - 1
+                } else {
+                    active_tab_pos - 1
+                };
 
-        self.switch_tabs(active_tab_idx, left_tab_idx, client_id);
-        self.log_and_report_session_state()
-            .context("failed to move tab to left")?;
+                self.switch_tabs(active_tab_pos, left_tab_pos, client_id);
+                self.log_and_report_session_state()
+                    .context("failed to move tab to left")?;
+            },
+            Err(err) => Err::<(), _>(err).with_context(err_context).non_fatal(),
+        }
         Ok(())
     }
 
@@ -1621,7 +1642,29 @@ impl Screen {
         }
     }
 
-    fn switch_tabs(&mut self, active_tab_idx: usize, other_tab_idx: usize, client_id: u16) {
+    fn switch_tabs(&mut self, active_tab_pos: usize, other_tab_pos: usize, client_id: u16) {
+        let Some(active_tab_idx) = self
+            .tabs
+            .values()
+            .find(|t| t.position == active_tab_pos)
+            .map(|t| t.index)
+        else {
+            log::error!("Failed to find active tab at position: {}", active_tab_pos);
+            return;
+        };
+        let Some(other_tab_idx) = self
+            .tabs
+            .values()
+            .find(|t| t.position == other_tab_pos)
+            .map(|t| t.index)
+        else {
+            log::error!(
+                "Failed to find tab to switch to at position: {}",
+                other_tab_pos
+            );
+            return;
+        };
+
         if !self.tabs.contains_key(&active_tab_idx) || !self.tabs.contains_key(&other_tab_idx) {
             warn!(
                 "failed to switch tabs: index {} or {} not found in {:?}",
@@ -1653,6 +1696,7 @@ impl Screen {
     }
 
     pub fn move_active_tab_to_right(&mut self, client_id: ClientId) -> Result<()> {
+        let err_context = || "Failed to move active tab right ";
         if self.tabs.len() < 2 {
             debug!("cannot move tab to right: only one tab exists");
             return Ok(());
@@ -1660,18 +1704,18 @@ impl Screen {
         let Some(client_id) = self.client_id(client_id) else {
             return Ok(());
         };
-        let Some(&active_tab_idx) = self.active_tab_indices.get(&client_id) else {
-            return Ok(());
-        };
 
-        // wraps around: [tab1, tab2, tab3] => [tab1, tab2, tab3]
-        //                             ^          ^
-        //                     active_tab_idx   right_tab_idx
-        let right_tab_idx = (active_tab_idx + 1) % self.tabs.len();
+        match self.get_active_tab(client_id) {
+            Ok(active_tab) => {
+                let active_tab_pos = active_tab.position;
+                let right_tab_pos = (active_tab_pos + 1) % self.tabs.len();
 
-        self.switch_tabs(active_tab_idx, right_tab_idx, client_id);
-        self.log_and_report_session_state()
-            .context("failed to move active tab to right")?;
+                self.switch_tabs(active_tab_pos, right_tab_pos, client_id);
+                self.log_and_report_session_state()
+                    .context("failed to move tab to the right")?;
+            },
+            Err(err) => Err::<(), _>(err).with_context(err_context).non_fatal(),
+        }
         Ok(())
     }
 
@@ -1733,12 +1777,6 @@ impl Screen {
             tab.mark_active_pane_for_rerender(client_id);
             tab.update_input_modes()?;
         }
-
-        if let Some(os_input) = &mut self.bus.os_input {
-            let _ =
-                os_input.send_to_client(client_id, ServerToClientMsg::SwitchToMode(mode_info.mode));
-        }
-
         Ok(())
     }
     pub fn change_mode_for_all_clients(&mut self, mode_info: ModeInfo) -> Result<()> {
@@ -2113,6 +2151,23 @@ impl Screen {
         }
         Ok(())
     }
+    pub fn rebind_keys(&mut self, new_keybinds: Keybinds, client_id: ClientId) -> Result<()> {
+        if self.connected_clients_contains(&client_id) {
+            let mode_info = self
+                .mode_info
+                .entry(client_id)
+                .or_insert_with(|| self.default_mode_info.clone());
+            mode_info.update_keybinds(new_keybinds);
+            for tab in self.tabs.values_mut() {
+                tab.change_mode_info(mode_info.clone(), client_id);
+                tab.mark_active_pane_for_rerender(client_id);
+                tab.update_input_modes()?;
+            }
+        } else {
+            log::error!("Could not find client_id {client_id} to rebind keys");
+        }
+        Ok(())
+    }
     fn unblock_input(&self) -> Result<()> {
         self.bus
             .senders
@@ -2135,8 +2190,23 @@ impl Screen {
             for (triggering_pane_id, p) in tab.get_suppressed_panes() {
                 suppressed_panes.insert(*triggering_pane_id, p);
             }
-            let active_pane_id =
-                first_client_id.and_then(|client_id| tab.get_active_pane_id(client_id));
+
+            let all_connected_clients: Vec<ClientId> = self
+                .connected_clients
+                .borrow()
+                .iter()
+                .copied()
+                .filter(|c| self.active_tab_indices.get(&c) == Some(&tab_index))
+                .collect();
+
+            let mut active_pane_ids: HashMap<ClientId, Option<PaneId>> = HashMap::new();
+            for connected_client_id in &all_connected_clients {
+                active_pane_ids.insert(
+                    *connected_client_id,
+                    tab.get_active_pane_id(*connected_client_id),
+                );
+            }
+
             let tiled_panes: Vec<PaneLayoutMetadata> = tab
                 .get_tiled_panes()
                 .map(|(pane_id, p)| {
@@ -2153,18 +2223,25 @@ impl Screen {
                     }
                 })
                 .map(|(pane_id, p)| {
+                    let focused_clients: Vec<ClientId> = active_pane_ids
+                        .iter()
+                        .filter_map(|(c_id, p_id)| {
+                            p_id.and_then(|p_id| if p_id == pane_id { Some(*c_id) } else { None })
+                        })
+                        .collect();
                     PaneLayoutMetadata::new(
                         pane_id,
                         p.position_and_size(),
                         p.borderless(),
                         p.invoked_with().clone(),
                         p.custom_title(),
-                        active_pane_id == Some(pane_id),
+                        !focused_clients.is_empty(),
                         if self.serialize_pane_viewport {
                             p.serialize(self.scrollback_lines_to_serialize)
                         } else {
                             None
                         },
+                        focused_clients,
                     )
                 })
                 .collect();
@@ -2184,18 +2261,25 @@ impl Screen {
                     }
                 })
                 .map(|(pane_id, p)| {
+                    let focused_clients: Vec<ClientId> = active_pane_ids
+                        .iter()
+                        .filter_map(|(c_id, p_id)| {
+                            p_id.and_then(|p_id| if p_id == pane_id { Some(*c_id) } else { None })
+                        })
+                        .collect();
                     PaneLayoutMetadata::new(
                         pane_id,
                         p.position_and_size(),
                         false, // floating panes are never borderless
                         p.invoked_with().clone(),
                         p.custom_title(),
-                        active_pane_id == Some(pane_id),
+                        !focused_clients.is_empty(),
                         if self.serialize_pane_viewport {
                             p.serialize(self.scrollback_lines_to_serialize)
                         } else {
                             None
                         },
+                        focused_clients,
                     )
                 })
                 .collect();
@@ -2224,6 +2308,9 @@ impl Screen {
             }
         }
         found_plugin
+    }
+    fn connected_clients_contains(&self, client_id: &ClientId) -> bool {
+        self.connected_clients.borrow().contains(client_id)
     }
 }
 
@@ -2256,6 +2343,13 @@ pub(crate) fn screen_thread_main(
         config_options.copy_on_select.unwrap_or(true),
     );
     let styled_underlines = config_options.styled_underlines.unwrap_or(true);
+    let explicitly_disable_kitty_keyboard_protocol = config_options
+        .support_kitty_keyboard_protocol
+        .map(|e| !e) // this is due to the config options wording, if
+        // "support_kitty_keyboard_protocol" is true,
+        // explicitly_disable_kitty_keyboard_protocol is false and vice versa
+        .unwrap_or(false); // by default, we try to support this if the terminal supports it and
+                           // the program running inside a pane requests it
 
     let thread_senders = bus.senders.clone();
     let mut screen = Screen::new(
@@ -2284,6 +2378,7 @@ pub(crate) fn screen_thread_main(
         styled_underlines,
         arrow_fonts,
         layout_dir,
+        explicitly_disable_kitty_keyboard_protocol,
     );
 
     let mut pending_tab_ids: HashSet<usize> = HashSet::new();
@@ -2475,15 +2570,20 @@ pub(crate) fn screen_thread_main(
                 screen.log_and_report_session_state()?;
                 screen.render(None)?;
             },
-            ScreenInstruction::WriteCharacter(bytes, client_id) => {
+            ScreenInstruction::WriteCharacter(
+                key_with_modifier,
+                raw_bytes,
+                is_kitty_keyboard_protocol,
+                client_id,
+            ) => {
                 let mut state_changed = false;
                 active_tab_and_connected_client_id!(
                     screen,
                     client_id,
                     |tab: &mut Tab, client_id: ClientId| {
                         let write_result = match tab.is_sync_panes_active() {
-                            true => tab.write_to_terminals_on_current_tab(bytes, client_id),
-                            false => tab.write_to_active_terminal(bytes, client_id),
+                            true => tab.write_to_terminals_on_current_tab(&key_with_modifier, raw_bytes, is_kitty_keyboard_protocol, client_id),
+                            false => tab.write_to_active_terminal(&key_with_modifier, raw_bytes, is_kitty_keyboard_protocol, client_id),
                         };
                         if let Ok(true) = write_result {
                             state_changed = true;
@@ -2629,6 +2729,32 @@ pub(crate) fn screen_thread_main(
                         client_id,
                     ))
                     .with_context(err_context)?;
+            },
+            ScreenInstruction::ListClientsMetadata(default_shell, client_id) => {
+                let err_context = || format!("Failed to dump layout");
+                let session_layout_metadata = screen.get_layout_metadata(default_shell);
+                screen
+                    .bus
+                    .senders
+                    .send_to_plugin(PluginInstruction::ListClientsMetadata(
+                        session_layout_metadata,
+                        client_id,
+                    ))
+                    .with_context(err_context)?;
+            },
+            ScreenInstruction::DumpLayoutToPlugin(plugin_id) => {
+                let err_context = || format!("Failed to dump layout");
+                let session_layout_metadata =
+                    screen.get_layout_metadata(screen.default_shell.clone());
+                screen
+                    .bus
+                    .senders
+                    .send_to_pty(PtyInstruction::DumpLayoutToPlugin(
+                        session_layout_metadata,
+                        plugin_id,
+                    ))
+                    .with_context(err_context)
+                    .non_fatal();
             },
             ScreenInstruction::EditScrollback(client_id) => {
                 active_tab_and_connected_client_id!(
@@ -3000,6 +3126,18 @@ pub(crate) fn screen_thread_main(
 
                 screen.unblock_input()?;
                 screen.render(None)?;
+                // we do this here in order to recover from a race condition on app start
+                // that sometimes causes Zellij to think the terminal window is a different size
+                // than it actually is - here, we query the client for its terminal size after
+                // we've finished the setup and handle it as we handle a normal resize,
+                // while this can affect other instances of a layout being applied, the query is
+                // very short and cheap and shouldn't cause any trouble
+                if let Some(os_input) = &mut screen.bus.os_input {
+                    for client_id in screen.connected_clients.borrow().iter() {
+                        let _ = os_input
+                            .send_to_client(*client_id, ServerToClientMsg::QueryTerminalSize);
+                    }
+                }
             },
             ScreenInstruction::GoToTab(tab_index, client_id) => {
                 let client_id_to_switch = if client_id.is_none() {
@@ -3516,7 +3654,7 @@ pub(crate) fn screen_thread_main(
                             should_float,
                             Some(run_plugin),
                             None,
-                            None,
+                            Some(client_id),
                         )
                     }, ?);
                 } else if let Some(active_tab) =
@@ -3853,7 +3991,7 @@ pub(crate) fn screen_thread_main(
                     // update state
                     screen.session_name = name.clone();
                     screen.default_mode_info.session_name = Some(name.clone());
-                    for (_client_id, mut mode_info) in screen.mode_info.iter_mut() {
+                    for (_client_id, mode_info) in screen.mode_info.iter_mut() {
                         mode_info.session_name = Some(name.clone());
                     }
                     for (_, tab) in screen.tabs.iter_mut() {
@@ -3888,6 +4026,9 @@ pub(crate) fn screen_thread_main(
                     set_session_name(name);
                 }
                 screen.unblock_input()?;
+            },
+            ScreenInstruction::RebindKeys(new_keybinds, client_id) => {
+                screen.rebind_keys(new_keybinds, client_id).non_fatal();
             },
         }
     }

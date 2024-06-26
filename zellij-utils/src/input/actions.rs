@@ -6,7 +6,7 @@ use super::layout::{
     SwapFloatingLayout, SwapTiledLayout, TiledPaneLayout,
 };
 use crate::cli::CliAction;
-use crate::data::{Direction, Resize};
+use crate::data::{Direction, KeyWithModifier, Resize};
 use crate::data::{FloatingPaneCoordinates, InputMode};
 use crate::home::{find_default_config_dir, get_layout_dir};
 use crate::input::config::{Config, ConfigError, KdlError};
@@ -102,7 +102,7 @@ pub enum Action {
     /// Quit Zellij.
     Quit,
     /// Write to the terminal.
-    Write(Vec<u8>),
+    Write(Option<KeyWithModifier>, Vec<u8>, bool), // bool -> is_kitty_keyboard_protocol
     /// Write Characters to the terminal.
     WriteChars(String),
     /// Switch to the specified input mode.
@@ -284,6 +284,20 @@ pub enum Action {
         cwd: Option<PathBuf>,
         pane_title: Option<String>,
     },
+    KeybindPipe {
+        name: Option<String>,
+        payload: Option<String>,
+        args: Option<BTreeMap<String, String>>,
+        plugin: Option<String>,
+        configuration: Option<BTreeMap<String, String>>,
+        launch_new: bool,
+        skip_cache: bool,
+        floating: Option<bool>,
+        in_place: Option<bool>,
+        cwd: Option<PathBuf>,
+        pane_title: Option<String>,
+    },
+    ListClients,
 }
 
 impl Action {
@@ -303,7 +317,7 @@ impl Action {
         config: Option<Config>,
     ) -> Result<Vec<Action>, String> {
         match cli_action {
-            CliAction::Write { bytes } => Ok(vec![Action::Write(bytes)]),
+            CliAction::Write { bytes } => Ok(vec![Action::Write(None, bytes, false)]),
             CliAction::WriteChars { chars } => Ok(vec![Action::WriteChars(chars)]),
             CliAction::Resize { resize, direction } => Ok(vec![Action::Resize(resize, direction)]),
             CliAction::FocusNextPane => Ok(vec![Action::FocusNextPane]),
@@ -312,6 +326,7 @@ impl Action {
             CliAction::MoveFocusOrTab { direction } => Ok(vec![Action::MoveFocusOrTab(direction)]),
             CliAction::MovePane { direction } => Ok(vec![Action::MovePane(direction)]),
             CliAction::MovePaneBackwards => Ok(vec![Action::MovePaneBackwards]),
+            CliAction::MoveTab { direction } => Ok(vec![Action::MoveTab(direction)]),
             CliAction::Clear => Ok(vec![Action::ClearScreen]),
             CliAction::DumpScreen { path, full } => Ok(vec![Action::DumpScreen(
                 path.as_os_str().to_string_lossy().into(),
@@ -353,7 +368,7 @@ impl Action {
                 let alias_cwd = cwd.clone().map(|cwd| current_dir.join(cwd));
                 let cwd = cwd
                     .map(|cwd| current_dir.join(cwd))
-                    .or_else(|| Some(current_dir));
+                    .or_else(|| Some(current_dir.clone()));
                 if let Some(plugin) = plugin {
                     let plugin = match RunPluginLocation::parse(&plugin, cwd.clone()) {
                         Ok(location) => {
@@ -365,11 +380,15 @@ impl Action {
                                 initial_cwd: cwd.clone(),
                             })
                         },
-                        Err(_) => RunPluginOrAlias::Alias(PluginAlias::new(
-                            &plugin,
-                            &configuration.map(|c| c.inner().clone()),
-                            alias_cwd,
-                        )),
+                        Err(_) => {
+                            let mut plugin_alias = PluginAlias::new(
+                                &plugin,
+                                &configuration.map(|c| c.inner().clone()),
+                                alias_cwd,
+                            );
+                            plugin_alias.set_caller_cwd_if_not_set(Some(current_dir));
+                            RunPluginOrAlias::Alias(plugin_alias)
+                        },
                     };
                     if floating {
                         Ok(vec![Action::NewFloatingPluginPane(
@@ -510,9 +529,25 @@ impl Action {
                     let layout_dir = layout_dir
                         .or_else(|| config.and_then(|c| c.options.layout_dir))
                         .or_else(|| get_layout_dir(find_default_config_dir()));
-                    let (path_to_raw_layout, raw_layout, swap_layouts) =
+
+                    let (path_to_raw_layout, raw_layout, swap_layouts) = if let Some(layout_url) =
+                        layout_path.to_str().and_then(|l| {
+                            if l.starts_with("http://") || l.starts_with("https://") {
+                                Some(l)
+                            } else {
+                                None
+                            }
+                        }) {
+                        (
+                            layout_url.to_owned(),
+                            Layout::stringified_from_url(layout_url)
+                                .map_err(|e| format!("Failed to load layout: {}", e))?,
+                            None,
+                        )
+                    } else {
                         Layout::stringified_from_path_or_default(Some(&layout_path), layout_dir)
-                            .map_err(|e| format!("Failed to load layout: {}", e))?;
+                            .map_err(|e| format!("Failed to load layout: {}", e))?
+                    };
                     let layout = Layout::from_str(&raw_layout, path_to_raw_layout, swap_layouts.as_ref().map(|(f, p)| (f.as_str(), p.as_str())), cwd).map_err(|e| {
                         let stringified_error = match e {
                             ConfigError::KdlError(kdl_error) => {
@@ -671,6 +706,7 @@ impl Action {
                     skip_cache,
                 }])
             },
+            CliAction::ListClients => Ok(vec![Action::ListClients]),
         }
     }
 }
