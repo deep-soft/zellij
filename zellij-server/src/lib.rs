@@ -28,7 +28,7 @@ use zellij_utils::envs;
 use zellij_utils::nix::sys::stat::{umask, Mode};
 use zellij_utils::pane_size::Size;
 
-use wasmer::Store;
+use wasmtime::{Config, Engine, Strategy};
 
 use crate::{
     os_input_output::ServerOsApi,
@@ -149,6 +149,7 @@ pub(crate) struct SessionMetaData {
     pub config_options: Box<Options>,
     pub client_keybinds: HashMap<ClientId, Keybinds>,
     pub client_input_modes: HashMap<ClientId, InputMode>,
+    pub default_mode: InputMode,
     screen_thread: Option<thread::JoinHandle<()>>,
     pty_thread: Option<thread::JoinHandle<()>>,
     plugin_thread: Option<thread::JoinHandle<()>>,
@@ -565,7 +566,12 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                     .send_to_plugin(PluginInstruction::AddClient(client_id))
                     .unwrap();
                 let default_mode = options.default_mode.unwrap_or_default();
-                let mode_info = get_mode_info(default_mode, &attrs, session_data.capabilities);
+                let mode_info = get_mode_info(
+                    default_mode,
+                    &attrs,
+                    session_data.capabilities,
+                    Some(default_mode),
+                );
                 session_data
                     .senders
                     .send_to_screen(ScreenInstruction::ChangeMode(mode_info.clone(), client_id))
@@ -999,6 +1005,8 @@ fn init_session(
         .clone()
         .unwrap_or_else(|| get_default_shell());
 
+    let default_mode = config_options.default_mode.unwrap_or_default();
+
     let pty_thread = thread::Builder::new()
         .name("pty".to_string())
         .spawn({
@@ -1069,7 +1077,7 @@ fn init_session(
                 Some(&to_background_jobs),
                 None,
             );
-            let store = get_store();
+            let engine = get_engine();
 
             let layout = layout.clone();
             let client_attributes = client_attributes.clone();
@@ -1079,7 +1087,7 @@ fn init_session(
             move || {
                 plugin_thread_main(
                     plugin_bus,
-                    store,
+                    engine,
                     data_dir,
                     layout,
                     layout_dir,
@@ -1089,6 +1097,7 @@ fn init_session(
                     client_attributes,
                     default_shell,
                     plugin_aliases,
+                    default_mode,
                 )
                 .fatal()
             }
@@ -1158,26 +1167,18 @@ fn init_session(
         plugin_thread: Some(plugin_thread),
         pty_writer_thread: Some(pty_writer_thread),
         background_jobs_thread: Some(background_jobs_thread),
+        default_mode,
     }
 }
 
 #[cfg(not(feature = "singlepass"))]
-fn get_store() -> Store {
-    use wasmer::{BaseTunables, Cranelift, Engine, Pages, Target};
+fn get_engine() -> Engine {
     log::info!("Compiling plugins using Cranelift");
-
-    // workaround for https://github.com/bytecodealliance/wasmtime/security/advisories/GHSA-ff4p-7xrq-q5r8
-    let mut tunables = BaseTunables::for_target(&Target::default());
-    tunables.static_memory_bound = Pages(0);
-    let compiler = Cranelift::default();
-    let mut engine: Engine = compiler.into();
-    engine.set_tunables(tunables);
-
-    Store::new(engine)
+    Engine::new(Config::new().strategy(Strategy::Cranelift)).unwrap()
 }
 
 #[cfg(feature = "singlepass")]
-fn get_store() -> Store {
+fn get_engine() -> Engine {
     log::info!("Compiling plugins using Singlepass");
-    Store::new(wasmer::Singlepass::default())
+    Engine::new(Config::new().strategy(Strategy::Winch)).unwrap()
 }

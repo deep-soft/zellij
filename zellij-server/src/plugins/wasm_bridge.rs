@@ -15,11 +15,11 @@ use std::{
     str::FromStr,
     sync::{Arc, Mutex},
 };
-use wasmer::{Module, Store, Value};
+use wasmtime::{Engine, Module};
 use zellij_utils::async_channel::Sender;
 use zellij_utils::async_std::task::{self, JoinHandle};
 use zellij_utils::consts::ZELLIJ_CACHE_DIR;
-use zellij_utils::data::{PermissionStatus, PermissionType, PipeMessage, PipeSource};
+use zellij_utils::data::{InputMode, PermissionStatus, PermissionType, PipeMessage, PipeSource};
 use zellij_utils::downloader::Downloader;
 use zellij_utils::input::permission::PermissionCache;
 use zellij_utils::notify_debouncer_full::{notify::RecommendedWatcher, Debouncer, FileIdMap};
@@ -77,7 +77,7 @@ impl PluginRenderAsset {
 pub struct WasmBridge {
     connected_clients: Arc<Mutex<Vec<ClientId>>>,
     senders: ThreadSenders,
-    store: Arc<Mutex<Store>>,
+    engine: Engine,
     plugin_dir: PathBuf,
     plugin_cache: Arc<Mutex<HashMap<PathBuf, Module>>>,
     plugin_map: Arc<Mutex<PluginMap>>,
@@ -102,12 +102,13 @@ pub struct WasmBridge {
         HashMap<RunPluginLocation, HashMap<PluginUserConfiguration, Vec<(PluginId, ClientId)>>>,
     pending_pipes: PendingPipes,
     layout_dir: Option<PathBuf>,
+    default_mode: InputMode,
 }
 
 impl WasmBridge {
     pub fn new(
         senders: ThreadSenders,
-        store: Arc<Mutex<Store>>,
+        engine: Engine,
         plugin_dir: PathBuf,
         path_to_default_shell: PathBuf,
         zellij_cwd: PathBuf,
@@ -116,6 +117,7 @@ impl WasmBridge {
         default_shell: Option<TerminalAction>,
         default_layout: Box<Layout>,
         layout_dir: Option<PathBuf>,
+        default_mode: InputMode,
     ) -> Self {
         let plugin_map = Arc::new(Mutex::new(PluginMap::default()));
         let connected_clients: Arc<Mutex<Vec<ClientId>>> = Arc::new(Mutex::new(vec![]));
@@ -125,7 +127,7 @@ impl WasmBridge {
         WasmBridge {
             connected_clients,
             senders,
-            store,
+            engine,
             plugin_dir,
             plugin_cache,
             plugin_map,
@@ -146,6 +148,7 @@ impl WasmBridge {
             cached_plugin_map: HashMap::new(),
             pending_pipes: Default::default(),
             layout_dir,
+            default_mode,
         }
     }
     pub fn load_plugin(
@@ -192,7 +195,7 @@ impl WasmBridge {
                     let plugin_dir = self.plugin_dir.clone();
                     let plugin_cache = self.plugin_cache.clone();
                     let senders = self.senders.clone();
-                    let store = self.store.clone();
+                    let engine = self.engine.clone();
                     let plugin_map = self.plugin_map.clone();
                     let connected_clients = self.connected_clients.clone();
                     let path_to_default_shell = self.path_to_default_shell.clone();
@@ -202,6 +205,7 @@ impl WasmBridge {
                     let default_shell = self.default_shell.clone();
                     let default_layout = self.default_layout.clone();
                     let layout_dir = self.layout_dir.clone();
+                    let default_mode = self.default_mode;
                     async move {
                         let _ = senders.send_to_background_jobs(
                             BackgroundJob::AnimatePluginLoading(plugin_id),
@@ -236,7 +240,7 @@ impl WasmBridge {
                             plugin_dir,
                             plugin_cache,
                             senders.clone(),
-                            store,
+                            engine,
                             plugin_map,
                             size,
                             connected_clients.clone(),
@@ -249,6 +253,7 @@ impl WasmBridge {
                             default_layout,
                             skip_cache,
                             layout_dir,
+                            default_mode,
                         ) {
                             Ok(_) => handle_plugin_successful_loading(&senders, plugin_id),
                             Err(e) => handle_plugin_loading_failure(
@@ -291,7 +296,7 @@ impl WasmBridge {
                 drop(worker_sender.send(MessageToWorker::Exit));
             }
             let running_plugin = running_plugin.lock().unwrap();
-            let cache_dir = running_plugin.plugin_env.plugin_own_data_dir.clone();
+            let cache_dir = running_plugin.store.data().plugin_own_data_dir.clone();
             if let Err(e) = std::fs::remove_dir_all(cache_dir) {
                 log::error!("Failed to remove cache dir for plugin: {:?}", e);
             }
@@ -330,7 +335,7 @@ impl WasmBridge {
             let plugin_dir = self.plugin_dir.clone();
             let plugin_cache = self.plugin_cache.clone();
             let senders = self.senders.clone();
-            let store = self.store.clone();
+            let engine = self.engine.clone();
             let plugin_map = self.plugin_map.clone();
             let connected_clients = self.connected_clients.clone();
             let path_to_default_shell = self.path_to_default_shell.clone();
@@ -340,13 +345,14 @@ impl WasmBridge {
             let default_shell = self.default_shell.clone();
             let default_layout = self.default_layout.clone();
             let layout_dir = self.layout_dir.clone();
+            let default_mode = self.default_mode;
             async move {
                 match PluginLoader::reload_plugin(
                     first_plugin_id,
                     plugin_dir.clone(),
                     plugin_cache.clone(),
                     senders.clone(),
-                    store.clone(),
+                    engine.clone(),
                     plugin_map.clone(),
                     connected_clients.clone(),
                     &mut loading_indication,
@@ -357,6 +363,7 @@ impl WasmBridge {
                     default_shell.clone(),
                     default_layout.clone(),
                     layout_dir.clone(),
+                    default_mode,
                 ) {
                     Ok(_) => {
                         handle_plugin_successful_loading(&senders, first_plugin_id);
@@ -371,7 +378,7 @@ impl WasmBridge {
                                 plugin_dir.clone(),
                                 plugin_cache.clone(),
                                 senders.clone(),
-                                store.clone(),
+                                engine.clone(),
                                 plugin_map.clone(),
                                 connected_clients.clone(),
                                 &mut loading_indication,
@@ -382,6 +389,7 @@ impl WasmBridge {
                                 default_shell.clone(),
                                 default_layout.clone(),
                                 layout_dir.clone(),
+                                default_mode,
                             ) {
                                 Ok(_) => handle_plugin_successful_loading(&senders, *plugin_id),
                                 Err(e) => handle_plugin_loading_failure(
@@ -423,7 +431,7 @@ impl WasmBridge {
             self.plugin_dir.clone(),
             self.plugin_cache.clone(),
             self.senders.clone(),
-            self.store.clone(),
+            self.engine.clone(),
             self.plugin_map.clone(),
             self.connected_clients.clone(),
             &mut loading_indication,
@@ -434,6 +442,7 @@ impl WasmBridge {
             self.default_shell.clone(),
             self.default_layout.clone(),
             self.layout_dir.clone(),
+            self.default_mode,
         ) {
             Ok(_) => {
                 let _ = self
@@ -491,23 +500,17 @@ impl WasmBridge {
                                 let rendered_bytes = running_plugin
                                     .instance
                                     .clone()
-                                    .exports
-                                    .get_function("render")
-                                    .map_err(anyError::new)
+                                    .get_typed_func::<(i32, i32), ()>(
+                                        &mut running_plugin.store,
+                                        "render",
+                                    )
                                     .and_then(|render| {
-                                        render
-                                            .call(
-                                                &mut running_plugin.store,
-                                                &[
-                                                    Value::I32(new_rows as i32),
-                                                    Value::I32(new_columns as i32),
-                                                ],
-                                            )
-                                            .map_err(anyError::new)
+                                        render.call(
+                                            &mut running_plugin.store,
+                                            (new_rows as i32, new_columns as i32),
+                                        )
                                     })
-                                    .and_then(|_| {
-                                        wasi_read_string(&running_plugin.plugin_env.wasi_env)
-                                    })
+                                    .and_then(|_| wasi_read_string(running_plugin.store.data()))
                                     .with_context(err_context);
                                 match rendered_bytes {
                                     Ok(rendered_bytes) => {
@@ -1078,12 +1081,13 @@ impl WasmBridge {
         };
 
         running_plugin
-            .plugin_env
+            .store
+            .data_mut()
             .set_permissions(HashSet::from_iter(permissions.clone()));
 
         let mut permission_cache = PermissionCache::from_path_or_default(cache_path);
         permission_cache.cache(
-            running_plugin.plugin_env.plugin.location.to_string(),
+            running_plugin.store.data().plugin.location.to_string(),
             permissions,
         );
 
@@ -1278,30 +1282,25 @@ pub fn apply_event_to_plugin(
     senders: ThreadSenders,
 ) -> Result<()> {
     let instance = &running_plugin.instance;
-    let plugin_env = &running_plugin.plugin_env;
     let rows = running_plugin.rows;
     let columns = running_plugin.columns;
 
     let err_context = || format!("Failed to apply event to plugin {plugin_id}");
-    match check_event_permission(plugin_env, event) {
+    match check_event_permission(running_plugin.store.data(), event) {
         (PermissionStatus::Granted, _) => {
             let protobuf_event: ProtobufEvent = event
                 .clone()
                 .try_into()
                 .map_err(|e| anyhow!("Failed to convert to protobuf: {:?}", e))?;
             let update = instance
-                .exports
-                .get_function("update")
+                .get_typed_func::<(), i32>(&mut running_plugin.store, "update")
                 .with_context(err_context)?;
-            wasi_write_object(&plugin_env.wasi_env, &protobuf_event.encode_to_vec())
+            wasi_write_object(running_plugin.store.data(), &protobuf_event.encode_to_vec())
                 .with_context(err_context)?;
-            let update_return = update
-                .call(&mut running_plugin.store, &[])
+            let should_render = update
+                .call(&mut running_plugin.store, ())
                 .with_context(err_context)?;
-            let mut should_render = match update_return.get(0) {
-                Some(Value::I32(n)) => *n == 1,
-                _ => false,
-            };
+            let mut should_render = should_render == 1;
             if let Event::PermissionRequestResult(..) = event {
                 // we always render in this case, otherwise the request permission screen stays on
                 // screen
@@ -1309,18 +1308,11 @@ pub fn apply_event_to_plugin(
             }
             if rows > 0 && columns > 0 && should_render {
                 let rendered_bytes = instance
-                    .exports
-                    .get_function("render")
-                    .map_err(anyError::new)
+                    .get_typed_func::<(i32, i32), ()>(&mut running_plugin.store, "render")
                     .and_then(|render| {
-                        render
-                            .call(
-                                &mut running_plugin.store,
-                                &[Value::I32(rows as i32), Value::I32(columns as i32)],
-                            )
-                            .map_err(anyError::new)
+                        render.call(&mut running_plugin.store, (rows as i32, columns as i32))
                     })
-                    .and_then(|_| wasi_read_string(&plugin_env.wasi_env))
+                    .and_then(|_| wasi_read_string(running_plugin.store.data()))
                     .with_context(err_context)?;
                 let pipes_to_block_or_unblock = pipes_to_block_or_unblock(running_plugin, None);
                 let plugin_render_asset = PluginRenderAsset::new(

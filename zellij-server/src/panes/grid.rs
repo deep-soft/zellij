@@ -1142,6 +1142,9 @@ impl Grid {
             Some((self.cursor.x, self.cursor.y))
         }
     }
+    pub fn is_mid_frame(&self) -> bool {
+        self.lock_renders
+    }
     /// Clears all buffers with text for a current screen
     pub fn clear_screen(&mut self) {
         if self.alternate_screen_state.is_some() {
@@ -2742,7 +2745,9 @@ impl Perform for Grid {
                     .next()
                     .map(|param| param[0] as usize)
                     .filter(|&param| param != 0)
-                    .map(|bottom| bottom.saturating_sub(1));
+                    .map(|bottom| {
+                        std::cmp::min(self.height.saturating_sub(1), bottom.saturating_sub(1))
+                    });
                 self.set_scroll_region(top, bottom);
                 if self.erasure_mode {
                     self.move_cursor_to_line(top, EMPTY_TERMINAL_CHARACTER);
