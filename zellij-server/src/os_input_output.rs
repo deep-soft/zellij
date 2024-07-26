@@ -337,6 +337,7 @@ fn spawn_terminal(
                 cwd,
                 hold_on_close: false,
                 hold_on_start: false,
+                ..Default::default()
             }
         },
         TerminalAction::RunCommand(command) => command,
@@ -740,7 +741,7 @@ impl ServerOsApi for ServerOsInputOutput {
         let mut system_info = System::new();
         // Update by minimizing information.
         // See https://docs.rs/sysinfo/0.22.5/sysinfo/struct.ProcessRefreshKind.html#
-        system_info.refresh_processes_specifics(ProcessRefreshKind::default());
+        system_info.refresh_process_specifics(pid.into(), ProcessRefreshKind::default());
 
         if let Some(process) = system_info.process(pid.into()) {
             let cwd = process.cwd();

@@ -235,6 +235,33 @@ impl TryFrom<ProtobufEvent> for Event {
                 },
                 _ => Err("Malformed payload for the WebRequestResult Event"),
             },
+            Some(ProtobufEventType::CommandPaneOpened) => match protobuf_event.payload {
+                Some(ProtobufEventPayload::CommandPaneOpenedPayload(
+                    command_pane_opened_payload,
+                )) => Ok(Event::CommandPaneOpened(
+                    command_pane_opened_payload.terminal_pane_id,
+                    command_pane_opened_payload
+                        .context
+                        .into_iter()
+                        .map(|c_i| (c_i.name, c_i.value))
+                        .collect(),
+                )),
+                _ => Err("Malformed payload for the CommandPaneOpened Event"),
+            },
+            Some(ProtobufEventType::CommandPaneExited) => match protobuf_event.payload {
+                Some(ProtobufEventPayload::CommandPaneExitedPayload(
+                    command_pane_exited_payload,
+                )) => Ok(Event::CommandPaneExited(
+                    command_pane_exited_payload.terminal_pane_id,
+                    command_pane_exited_payload.exit_code,
+                    command_pane_exited_payload
+                        .context
+                        .into_iter()
+                        .map(|c_i| (c_i.name, c_i.value))
+                        .collect(),
+                )),
+                _ => Err("Malformed payload for the CommandPaneExited Event"),
+            },
             None => Err("Unknown Protobuf Event"),
         }
     }
@@ -460,6 +487,37 @@ impl TryFrom<Event> for ProtobufEvent {
                     )),
                 })
             },
+            Event::CommandPaneOpened(terminal_pane_id, context) => {
+                let command_pane_opened_payload = CommandPaneOpenedPayload {
+                    terminal_pane_id,
+                    context: context
+                        .into_iter()
+                        .map(|(name, value)| ContextItem { name, value })
+                        .collect(),
+                };
+                Ok(ProtobufEvent {
+                    name: ProtobufEventType::CommandPaneOpened as i32,
+                    payload: Some(event::Payload::CommandPaneOpenedPayload(
+                        command_pane_opened_payload,
+                    )),
+                })
+            },
+            Event::CommandPaneExited(terminal_pane_id, exit_code, context) => {
+                let command_pane_exited_payload = CommandPaneExitedPayload {
+                    terminal_pane_id,
+                    exit_code,
+                    context: context
+                        .into_iter()
+                        .map(|(name, value)| ContextItem { name, value })
+                        .collect(),
+                };
+                Ok(ProtobufEvent {
+                    name: ProtobufEventType::CommandPaneExited as i32,
+                    payload: Some(event::Payload::CommandPaneExitedPayload(
+                        command_pane_exited_payload,
+                    )),
+                })
+            },
         }
     }
 }
@@ -550,6 +608,10 @@ impl TryFrom<LayoutInfo> for ProtobufLayoutInfo {
                 source: "url".to_owned(),
                 name,
             }),
+            LayoutInfo::Stringified(stringified_layout) => Ok(ProtobufLayoutInfo {
+                source: "stringified".to_owned(),
+                name: stringified_layout.clone(),
+            }),
         }
     }
 }
@@ -561,6 +623,7 @@ impl TryFrom<ProtobufLayoutInfo> for LayoutInfo {
             "file" => Ok(LayoutInfo::File(protobuf_layout_info.name)),
             "built-in" => Ok(LayoutInfo::BuiltIn(protobuf_layout_info.name)),
             "url" => Ok(LayoutInfo::Url(protobuf_layout_info.name)),
+            "stringified" => Ok(LayoutInfo::Stringified(protobuf_layout_info.name)),
             _ => Err("Unknown source for layout"),
         }
     }
@@ -958,6 +1021,8 @@ impl TryFrom<ProtobufEventType> for EventType {
             ProtobufEventType::SessionUpdate => EventType::SessionUpdate,
             ProtobufEventType::RunCommandResult => EventType::RunCommandResult,
             ProtobufEventType::WebRequestResult => EventType::WebRequestResult,
+            ProtobufEventType::CommandPaneOpened => EventType::CommandPaneOpened,
+            ProtobufEventType::CommandPaneExited => EventType::CommandPaneExited,
         })
     }
 }
@@ -985,6 +1050,8 @@ impl TryFrom<EventType> for ProtobufEventType {
             EventType::SessionUpdate => ProtobufEventType::SessionUpdate,
             EventType::RunCommandResult => ProtobufEventType::RunCommandResult,
             EventType::WebRequestResult => ProtobufEventType::WebRequestResult,
+            EventType::CommandPaneOpened => ProtobufEventType::CommandPaneOpened,
+            EventType::CommandPaneExited => ProtobufEventType::CommandPaneExited,
         })
     }
 }
