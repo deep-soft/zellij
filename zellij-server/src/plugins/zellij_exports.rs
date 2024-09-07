@@ -2,6 +2,7 @@ use super::PluginInstruction;
 use crate::background_jobs::BackgroundJob;
 use crate::plugins::plugin_map::PluginEnv;
 use crate::plugins::wasm_bridge::handle_plugin_crash;
+use crate::pty::{ClientTabIndexOrPaneId, PtyInstruction};
 use crate::route::route_action;
 use crate::ServerInstruction;
 use log::{debug, warn};
@@ -22,6 +23,7 @@ use zellij_utils::data::{
 };
 use zellij_utils::input::permission::PermissionCache;
 use zellij_utils::{
+    async_std::task,
     interprocess::local_socket::LocalSocketStream,
     ipc::{ClientToServerMsg, IpcSenderWithContext},
 };
@@ -37,7 +39,7 @@ use zellij_utils::{
     errors::prelude::*,
     input::{
         actions::Action,
-        command::{RunCommand, RunCommandAction, TerminalAction},
+        command::{OpenFilePayload, RunCommand, RunCommandAction, TerminalAction},
         layout::{Layout, RunPluginOrAlias},
         plugins::PluginType,
     },
@@ -91,10 +93,14 @@ fn host_run_plugin_command(caller: Caller<'_, PluginEnv>) {
                     PluginCommand::SetSelectable(selectable) => set_selectable(env, selectable),
                     PluginCommand::GetPluginIds => get_plugin_ids(env),
                     PluginCommand::GetZellijVersion => get_zellij_version(env),
-                    PluginCommand::OpenFile(file_to_open) => open_file(env, file_to_open),
-                    PluginCommand::OpenFileFloating(file_to_open, floating_pane_coordinates) => {
-                        open_file_floating(env, file_to_open, floating_pane_coordinates)
+                    PluginCommand::OpenFile(file_to_open, context) => {
+                        open_file(env, file_to_open, context)
                     },
+                    PluginCommand::OpenFileFloating(
+                        file_to_open,
+                        floating_pane_coordinates,
+                        context,
+                    ) => open_file_floating(env, file_to_open, floating_pane_coordinates, context),
                     PluginCommand::OpenTerminal(cwd) => open_terminal(env, cwd.path.try_into()?),
                     PluginCommand::OpenTerminalFloating(cwd, floating_pane_coordinates) => {
                         open_terminal_floating(env, cwd.path.try_into()?, floating_pane_coordinates)
@@ -221,8 +227,8 @@ fn host_run_plugin_command(caller: Caller<'_, PluginEnv>) {
                         delete_dead_session(session_name)?
                     },
                     PluginCommand::DeleteAllDeadSessions => delete_all_dead_sessions()?,
-                    PluginCommand::OpenFileInPlace(file_to_open) => {
-                        open_file_in_place(env, file_to_open)
+                    PluginCommand::OpenFileInPlace(file_to_open, context) => {
+                        open_file_in_place(env, file_to_open, context)
                     },
                     PluginCommand::OpenTerminalInPlace(cwd) => {
                         open_terminal_in_place(env, cwd.path.try_into()?)
@@ -251,12 +257,68 @@ fn host_run_plugin_command(caller: Caller<'_, PluginEnv>) {
                     PluginCommand::WatchFilesystem => watch_filesystem(env),
                     PluginCommand::DumpSessionLayout => dump_session_layout(env),
                     PluginCommand::CloseSelf => close_self(env),
-                    PluginCommand::Reconfigure(new_config) => reconfigure(env, new_config)?,
+                    PluginCommand::Reconfigure(new_config, write_config_to_disk) => {
+                        reconfigure(env, new_config, write_config_to_disk)?
+                    },
                     PluginCommand::HidePaneWithId(pane_id) => {
                         hide_pane_with_id(env, pane_id.into())?
                     },
                     PluginCommand::ShowPaneWithId(pane_id, should_float_if_hidden) => {
                         show_pane_with_id(env, pane_id.into(), should_float_if_hidden)
+                    },
+                    PluginCommand::OpenCommandPaneBackground(command_to_run, context) => {
+                        open_command_pane_background(env, command_to_run, context)
+                    },
+                    PluginCommand::RerunCommandPane(terminal_pane_id) => {
+                        rerun_command_pane(env, terminal_pane_id)
+                    },
+                    PluginCommand::ResizePaneIdWithDirection(resize, pane_id) => {
+                        resize_pane_with_id(env, resize, pane_id.into())
+                    },
+                    PluginCommand::EditScrollbackForPaneWithId(pane_id) => {
+                        edit_scrollback_for_pane_with_id(env, pane_id.into())
+                    },
+                    PluginCommand::WriteToPaneId(bytes, pane_id) => {
+                        write_to_pane_id(env, bytes, pane_id.into())
+                    },
+                    PluginCommand::WriteCharsToPaneId(chars, pane_id) => {
+                        write_chars_to_pane_id(env, chars, pane_id.into())
+                    },
+                    PluginCommand::MovePaneWithPaneId(pane_id) => {
+                        move_pane_with_pane_id(env, pane_id.into())
+                    },
+                    PluginCommand::MovePaneWithPaneIdInDirection(pane_id, direction) => {
+                        move_pane_with_pane_id_in_direction(env, pane_id.into(), direction)
+                    },
+                    PluginCommand::ClearScreenForPaneId(pane_id) => {
+                        clear_screen_for_pane_id(env, pane_id.into())
+                    },
+                    PluginCommand::ScrollUpInPaneId(pane_id) => {
+                        scroll_up_in_pane_id(env, pane_id.into())
+                    },
+                    PluginCommand::ScrollDownInPaneId(pane_id) => {
+                        scroll_down_in_pane_id(env, pane_id.into())
+                    },
+                    PluginCommand::ScrollToTopInPaneId(pane_id) => {
+                        scroll_to_top_in_pane_id(env, pane_id.into())
+                    },
+                    PluginCommand::ScrollToBottomInPaneId(pane_id) => {
+                        scroll_to_bottom_in_pane_id(env, pane_id.into())
+                    },
+                    PluginCommand::PageScrollUpInPaneId(pane_id) => {
+                        page_scroll_up_in_pane_id(env, pane_id.into())
+                    },
+                    PluginCommand::PageScrollDownInPaneId(pane_id) => {
+                        page_scroll_down_in_pane_id(env, pane_id.into())
+                    },
+                    PluginCommand::TogglePaneIdFullscreen(pane_id) => {
+                        toggle_pane_id_fullscreen(env, pane_id.into())
+                    },
+                    PluginCommand::TogglePaneEmbedOrEjectForPaneId(pane_id) => {
+                        toggle_pane_embed_or_eject_for_pane_id(env, pane_id.into())
+                    },
+                    PluginCommand::CloseTabWithIndex(tab_index) => {
+                        close_tab_with_index(env, tab_index)
                     },
                 },
                 (PermissionStatus::Denied, permission) => {
@@ -355,6 +417,7 @@ fn request_permission(env: &PluginEnv, permissions: Vec<PermissionType>) -> Resu
     if PermissionCache::from_path_or_default(None)
         .check_permissions(env.plugin.location.to_string(), &permissions)
     {
+        log::info!("PermissionRequestResult 1");
         return env
             .senders
             .send_to_plugin(PluginInstruction::PermissionRequestResult(
@@ -416,22 +479,24 @@ fn get_zellij_version(env: &PluginEnv) {
         .non_fatal();
 }
 
-fn open_file(env: &PluginEnv, file_to_open: FileToOpen) {
+fn open_file(env: &PluginEnv, file_to_open: FileToOpen, context: BTreeMap<String, String>) {
     let error_msg = || format!("failed to open file in plugin {}", env.name());
     let floating = false;
     let in_place = false;
+    let start_suppressed = false;
     let path = env.plugin_cwd.join(file_to_open.path);
     let cwd = file_to_open
         .cwd
         .map(|cwd| env.plugin_cwd.join(cwd))
         .or_else(|| Some(env.plugin_cwd.clone()));
     let action = Action::EditFile(
-        path,
-        file_to_open.line_number,
-        cwd,
+        OpenFilePayload::new(path, file_to_open.line_number, cwd).with_originating_plugin(
+            OriginatingPlugin::new(env.plugin_id, env.client_id, context),
+        ),
         None,
         floating,
         in_place,
+        start_suppressed,
         None,
     );
     apply_action!(action, error_msg, env);
@@ -441,31 +506,39 @@ fn open_file_floating(
     env: &PluginEnv,
     file_to_open: FileToOpen,
     floating_pane_coordinates: Option<FloatingPaneCoordinates>,
+    context: BTreeMap<String, String>,
 ) {
     let error_msg = || format!("failed to open file in plugin {}", env.name());
     let floating = true;
     let in_place = false;
+    let start_suppressed = false;
     let path = env.plugin_cwd.join(file_to_open.path);
     let cwd = file_to_open
         .cwd
         .map(|cwd| env.plugin_cwd.join(cwd))
         .or_else(|| Some(env.plugin_cwd.clone()));
     let action = Action::EditFile(
-        path,
-        file_to_open.line_number,
-        cwd,
+        OpenFilePayload::new(path, file_to_open.line_number, cwd).with_originating_plugin(
+            OriginatingPlugin::new(env.plugin_id, env.client_id, context),
+        ),
         None,
         floating,
         in_place,
+        start_suppressed,
         floating_pane_coordinates,
     );
     apply_action!(action, error_msg, env);
 }
 
-fn open_file_in_place(env: &PluginEnv, file_to_open: FileToOpen) {
+fn open_file_in_place(
+    env: &PluginEnv,
+    file_to_open: FileToOpen,
+    context: BTreeMap<String, String>,
+) {
     let error_msg = || format!("failed to open file in plugin {}", env.name());
     let floating = false;
     let in_place = true;
+    let start_suppressed = false;
     let path = env.plugin_cwd.join(file_to_open.path);
     let cwd = file_to_open
         .cwd
@@ -473,12 +546,13 @@ fn open_file_in_place(env: &PluginEnv, file_to_open: FileToOpen) {
         .or_else(|| Some(env.plugin_cwd.clone()));
 
     let action = Action::EditFile(
-        path,
-        file_to_open.line_number,
-        cwd,
+        OpenFilePayload::new(path, file_to_open.line_number, cwd).with_originating_plugin(
+            OriginatingPlugin::new(env.plugin_id, env.client_id, context),
+        ),
         None,
         floating,
         in_place,
+        start_suppressed,
         None,
     );
     apply_action!(action, error_msg, env);
@@ -633,6 +707,52 @@ fn open_command_pane_in_place(
     apply_action!(action, error_msg, env);
 }
 
+fn open_command_pane_background(
+    env: &PluginEnv,
+    command_to_run: CommandToRun,
+    context: BTreeMap<String, String>,
+) {
+    let command = command_to_run.path;
+    let cwd = command_to_run
+        .cwd
+        .map(|cwd| env.plugin_cwd.join(cwd))
+        .or_else(|| Some(env.plugin_cwd.clone()));
+    let args = command_to_run.args;
+    let direction = None;
+    let hold_on_close = true;
+    let hold_on_start = false;
+    let start_suppressed = true;
+    let name = None;
+    let run_command_action = RunCommandAction {
+        command,
+        args,
+        cwd,
+        direction,
+        hold_on_close,
+        hold_on_start,
+        originating_plugin: Some(OriginatingPlugin::new(
+            env.plugin_id,
+            env.client_id,
+            context,
+        )),
+    };
+    let run_cmd = TerminalAction::RunCommand(run_command_action.into());
+    let _ = env.senders.send_to_pty(PtyInstruction::SpawnTerminal(
+        Some(run_cmd),
+        None,
+        name,
+        None,
+        start_suppressed,
+        ClientTabIndexOrPaneId::ClientId(env.client_id),
+    ));
+}
+
+fn rerun_command_pane(env: &PluginEnv, terminal_pane_id: u32) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::RerunCommandPane(terminal_pane_id));
+}
+
 fn switch_tab_to(env: &PluginEnv, tab_idx: u32) {
     env.senders
         .send_to_screen(ScreenInstruction::GoToTab(tab_idx, Some(env.client_id)))
@@ -646,23 +766,13 @@ fn switch_tab_to(env: &PluginEnv, tab_idx: u32) {
 }
 
 fn set_timeout(env: &PluginEnv, secs: f64) {
-    // There is a fancy, high-performance way to do this with zero additional threads:
-    // If the plugin thread keeps a BinaryHeap of timer structs, it can manage multiple and easily `.peek()` at the
-    // next time to trigger in O(1) time. Once the wake-up time is known, the `wasm` thread can use `recv_timeout()`
-    // to wait for an event with the timeout set to be the time of the next wake up. If events come in in the meantime,
-    // they are handled, but if the timeout triggers, we replace the event from `recv()` with an
-    // `Update(pid, TimerEvent)` and pop the timer from the Heap (or reschedule it). No additional threads for as many
-    // timers as we'd like.
-    //
-    // But that's a lot of code, and this is a few lines:
     let send_plugin_instructions = env.senders.to_plugin.clone();
     let update_target = Some(env.plugin_id);
     let client_id = env.client_id;
     let plugin_name = env.name();
-    // TODO: we should really use an async task for this
-    thread::spawn(move || {
+    task::spawn(async move {
         let start_time = Instant::now();
-        thread::sleep(Duration::from_secs_f64(secs));
+        task::sleep(Duration::from_secs_f64(secs)).await;
         // FIXME: The way that elapsed time is being calculated here is not exact; it doesn't take into account the
         // time it takes an event to actually reach the plugin after it's sent to the `wasm` thread.
         let elapsed_time = Instant::now().duration_since(start_time).as_secs_f64();
@@ -834,11 +944,15 @@ fn close_self(env: &PluginEnv) {
         .non_fatal();
 }
 
-fn reconfigure(env: &PluginEnv, new_config: String) -> Result<()> {
+fn reconfigure(env: &PluginEnv, new_config: String, write_config_to_disk: bool) -> Result<()> {
     let err_context = || "Failed to reconfigure";
     let client_id = env.client_id;
     env.senders
-        .send_to_server(ServerInstruction::Reconfigure(client_id, new_config))
+        .send_to_server(ServerInstruction::Reconfigure {
+            client_id,
+            config: new_config,
+            write_config_to_disk,
+        })
         .with_context(err_context)?;
     Ok(())
 }
@@ -1376,6 +1490,105 @@ fn scan_host_folder(env: &PluginEnv, folder_to_scan: PathBuf) {
     }
 }
 
+fn resize_pane_with_id(env: &PluginEnv, resize: ResizeStrategy, pane_id: PaneId) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::ResizePaneWithId(resize, pane_id));
+}
+
+fn edit_scrollback_for_pane_with_id(env: &PluginEnv, pane_id: PaneId) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::EditScrollbackForPaneWithId(pane_id));
+}
+
+fn write_to_pane_id(env: &PluginEnv, bytes: Vec<u8>, pane_id: PaneId) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::WriteToPaneId(bytes, pane_id));
+}
+
+fn write_chars_to_pane_id(env: &PluginEnv, chars: String, pane_id: PaneId) {
+    let bytes = chars.into_bytes();
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::WriteToPaneId(bytes, pane_id));
+}
+
+fn move_pane_with_pane_id(env: &PluginEnv, pane_id: PaneId) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::MovePaneWithPaneId(pane_id));
+}
+
+fn move_pane_with_pane_id_in_direction(env: &PluginEnv, pane_id: PaneId, direction: Direction) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::MovePaneWithPaneIdInDirection(
+            pane_id, direction,
+        ));
+}
+
+fn clear_screen_for_pane_id(env: &PluginEnv, pane_id: PaneId) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::ClearScreenForPaneId(pane_id));
+}
+
+fn scroll_up_in_pane_id(env: &PluginEnv, pane_id: PaneId) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::ScrollUpInPaneId(pane_id));
+}
+
+fn scroll_down_in_pane_id(env: &PluginEnv, pane_id: PaneId) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::ScrollDownInPaneId(pane_id));
+}
+
+fn scroll_to_top_in_pane_id(env: &PluginEnv, pane_id: PaneId) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::ScrollToTopInPaneId(pane_id));
+}
+
+fn scroll_to_bottom_in_pane_id(env: &PluginEnv, pane_id: PaneId) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::ScrollToBottomInPaneId(pane_id));
+}
+
+fn page_scroll_up_in_pane_id(env: &PluginEnv, pane_id: PaneId) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::PageScrollUpInPaneId(pane_id));
+}
+
+fn page_scroll_down_in_pane_id(env: &PluginEnv, pane_id: PaneId) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::PageScrollDownInPaneId(pane_id));
+}
+
+fn toggle_pane_id_fullscreen(env: &PluginEnv, pane_id: PaneId) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::TogglePaneIdFullscreen(pane_id));
+}
+
+fn toggle_pane_embed_or_eject_for_pane_id(env: &PluginEnv, pane_id: PaneId) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::TogglePaneEmbedOrEjectForPaneId(pane_id));
+}
+
+fn close_tab_with_index(env: &PluginEnv, tab_index: usize) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::CloseTabWithIndex(tab_index));
+}
+
 // Custom panic handler for plugins.
 //
 // This is called when a panic occurs in a plugin. Since most panics will likely originate in the
@@ -1446,10 +1659,14 @@ fn check_command_permission(
         PluginCommand::OpenCommandPane(..)
         | PluginCommand::OpenCommandPaneFloating(..)
         | PluginCommand::OpenCommandPaneInPlace(..)
+        | PluginCommand::OpenCommandPaneBackground(..)
         | PluginCommand::RunCommand(..)
         | PluginCommand::ExecCmd(..) => PermissionType::RunCommands,
         PluginCommand::WebRequest(..) => PermissionType::WebAccess,
-        PluginCommand::Write(..) | PluginCommand::WriteChars(..) => PermissionType::WriteToStdin,
+        PluginCommand::Write(..)
+        | PluginCommand::WriteChars(..)
+        | PluginCommand::WriteToPaneId(..)
+        | PluginCommand::WriteCharsToPaneId(..) => PermissionType::WriteToStdin,
         PluginCommand::SwitchTabTo(..)
         | PluginCommand::SwitchToMode(..)
         | PluginCommand::NewTabsWithLayout(..)
@@ -1464,19 +1681,31 @@ fn check_command_permission(
         | PluginCommand::MoveFocusOrTab(..)
         | PluginCommand::Detach
         | PluginCommand::EditScrollback
+        | PluginCommand::EditScrollbackForPaneWithId(..)
         | PluginCommand::ToggleTab
         | PluginCommand::MovePane
         | PluginCommand::MovePaneWithDirection(..)
+        | PluginCommand::MovePaneWithPaneId(..)
+        | PluginCommand::MovePaneWithPaneIdInDirection(..)
         | PluginCommand::ClearScreen
+        | PluginCommand::ClearScreenForPaneId(..)
         | PluginCommand::ScrollUp
+        | PluginCommand::ScrollUpInPaneId(..)
         | PluginCommand::ScrollDown
+        | PluginCommand::ScrollDownInPaneId(..)
         | PluginCommand::ScrollToTop
+        | PluginCommand::ScrollToTopInPaneId(..)
         | PluginCommand::ScrollToBottom
+        | PluginCommand::ScrollToBottomInPaneId(..)
         | PluginCommand::PageScrollUp
+        | PluginCommand::PageScrollUpInPaneId(..)
         | PluginCommand::PageScrollDown
+        | PluginCommand::PageScrollDownInPaneId(..)
         | PluginCommand::ToggleFocusFullscreen
+        | PluginCommand::TogglePaneIdFullscreen(..)
         | PluginCommand::TogglePaneFrames
         | PluginCommand::TogglePaneEmbedOrEject
+        | PluginCommand::TogglePaneEmbedOrEjectForPaneId(..)
         | PluginCommand::UndoRenamePane
         | PluginCommand::CloseFocus
         | PluginCommand::ToggleActiveTabSync
@@ -1502,6 +1731,9 @@ fn check_command_permission(
         | PluginCommand::DisconnectOtherClients
         | PluginCommand::ShowPaneWithId(..)
         | PluginCommand::HidePaneWithId(..)
+        | PluginCommand::RerunCommandPane(..)
+        | PluginCommand::ResizePaneIdWithDirection(..)
+        | PluginCommand::CloseTabWithIndex(..)
         | PluginCommand::KillSessions(..) => PermissionType::ChangeApplicationState,
         PluginCommand::UnblockCliPipeInput(..)
         | PluginCommand::BlockCliPipeInput(..)

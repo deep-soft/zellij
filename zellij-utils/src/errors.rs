@@ -354,6 +354,22 @@ pub enum ScreenContext {
     DumpLayoutToPlugin,
     ListClientsMetadata,
     Reconfigure,
+    RerunCommandPane,
+    ResizePaneWithId,
+    EditScrollbackForPaneWithId,
+    WriteToPaneId,
+    MovePaneWithPaneId,
+    MovePaneWithPaneIdInDirection,
+    ClearScreenForPaneId,
+    ScrollUpInPaneId,
+    ScrollDownInPaneId,
+    ScrollToTopInPaneId,
+    ScrollToBottomInPaneId,
+    PageScrollUpInPaneId,
+    PageScrollDownInPaneId,
+    TogglePaneIdFullscreen,
+    TogglePaneEmbedOrEjectForPaneId,
+    CloseTabWithIndex,
 }
 
 /// Stack call representations corresponding to the different types of [`PtyInstruction`]s.
@@ -376,6 +392,7 @@ pub enum PtyContext {
     FillPluginCwd,
     DumpLayoutToPlugin,
     ListClientsMetadata,
+    Reconfigure,
     Exit,
 }
 
@@ -410,6 +427,7 @@ pub enum PluginContext {
     DumpLayoutToPlugin,
     ListClientsMetadata,
     Reconfigure,
+    FailedToWriteConfigToDisk,
 }
 
 /// Stack call representations corresponding to the different types of [`ClientInstruction`]s.
@@ -433,6 +451,7 @@ pub enum ClientContext {
     UnblockCliPipeInput,
     CliPipeOutput,
     QueryTerminalSize,
+    WriteConfigToDisk,
 }
 
 /// Stack call representations corresponding to the different types of [`ServerInstruction`]s.
@@ -459,6 +478,8 @@ pub enum ServerContext {
     ChangeMode,
     ChangeModeForAllClients,
     Reconfigure,
+    ConfigWrittenToDisk,
+    FailedToWriteConfigToDisk,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

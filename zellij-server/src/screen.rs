@@ -13,6 +13,7 @@ use zellij_utils::data::{
 };
 use zellij_utils::errors::prelude::*;
 use zellij_utils::input::command::RunCommand;
+use zellij_utils::input::config::Config;
 use zellij_utils::input::keybinds::Keybinds;
 use zellij_utils::input::options::Clipboard;
 use zellij_utils::pane_size::{Size, SizeInPixels};
@@ -53,7 +54,7 @@ use zellij_utils::{
         PluginCapabilities, Style, TabInfo,
     },
     errors::{ContextType, ScreenContext},
-    input::{get_mode_info, options::Options},
+    input::get_mode_info,
     ipc::{ClientAttributes, PixelDimensions, ServerToClientMsg},
 };
 
@@ -152,9 +153,10 @@ pub enum ScreenInstruction {
         HoldForCommand,
         Option<Run>, // invoked with
         Option<FloatingPaneCoordinates>,
+        bool, // start suppressed
         ClientTabIndexOrPaneId,
     ),
-    OpenInPlaceEditor(PaneId, ClientId),
+    OpenInPlaceEditor(PaneId, ClientTabIndexOrPaneId),
     TogglePaneEmbedOrFloating(ClientId),
     ToggleFloatingPanes(ClientId, Option<TerminalAction>),
     HorizontalSplit(PaneId, Option<InitialTitle>, HoldForCommand, ClientId),
@@ -312,6 +314,7 @@ pub enum ScreenInstruction {
         u32,            // plugin id
         Option<PaneId>,
         Option<PathBuf>, // cwd
+        bool,            // start suppressed
         Option<ClientId>,
     ),
     UpdatePluginLoadingStage(u32, LoadingIndication), // u32 - plugin_id
@@ -363,9 +366,35 @@ pub enum ScreenInstruction {
     ListClientsMetadata(Option<PathBuf>, ClientId), // Option<PathBuf> - default shell
     Reconfigure {
         client_id: ClientId,
-        keybinds: Option<Keybinds>,
-        default_mode: Option<InputMode>,
+        keybinds: Keybinds,
+        default_mode: InputMode,
+        theme: Palette,
+        simplified_ui: bool,
+        default_shell: Option<PathBuf>,
+        pane_frames: bool,
+        copy_command: Option<String>,
+        copy_to_clipboard: Option<Clipboard>,
+        copy_on_select: bool,
+        auto_layout: bool,
+        rounded_corners: bool,
+        hide_session_name: bool,
     },
+    RerunCommandPane(u32), // u32 - terminal pane id
+    ResizePaneWithId(ResizeStrategy, PaneId),
+    EditScrollbackForPaneWithId(PaneId),
+    WriteToPaneId(Vec<u8>, PaneId),
+    MovePaneWithPaneId(PaneId),
+    MovePaneWithPaneIdInDirection(PaneId, Direction),
+    ClearScreenForPaneId(PaneId),
+    ScrollUpInPaneId(PaneId),
+    ScrollDownInPaneId(PaneId),
+    ScrollToTopInPaneId(PaneId),
+    ScrollToBottomInPaneId(PaneId),
+    PageScrollUpInPaneId(PaneId),
+    PageScrollDownInPaneId(PaneId),
+    TogglePaneIdFullscreen(PaneId),
+    TogglePaneEmbedOrEjectForPaneId(PaneId),
+    CloseTabWithIndex(usize),
 }
 
 impl From<&ScreenInstruction> for ScreenContext {
@@ -551,6 +580,28 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::RenameSession(..) => ScreenContext::RenameSession,
             ScreenInstruction::ListClientsMetadata(..) => ScreenContext::ListClientsMetadata,
             ScreenInstruction::Reconfigure { .. } => ScreenContext::Reconfigure,
+            ScreenInstruction::RerunCommandPane { .. } => ScreenContext::RerunCommandPane,
+            ScreenInstruction::ResizePaneWithId(..) => ScreenContext::ResizePaneWithId,
+            ScreenInstruction::EditScrollbackForPaneWithId(..) => {
+                ScreenContext::EditScrollbackForPaneWithId
+            },
+            ScreenInstruction::WriteToPaneId(..) => ScreenContext::WriteToPaneId,
+            ScreenInstruction::MovePaneWithPaneId(..) => ScreenContext::MovePaneWithPaneId,
+            ScreenInstruction::MovePaneWithPaneIdInDirection(..) => {
+                ScreenContext::MovePaneWithPaneIdInDirection
+            },
+            ScreenInstruction::ClearScreenForPaneId(..) => ScreenContext::ClearScreenForPaneId,
+            ScreenInstruction::ScrollUpInPaneId(..) => ScreenContext::ScrollUpInPaneId,
+            ScreenInstruction::ScrollDownInPaneId(..) => ScreenContext::ScrollDownInPaneId,
+            ScreenInstruction::ScrollToTopInPaneId(..) => ScreenContext::ScrollToTopInPaneId,
+            ScreenInstruction::ScrollToBottomInPaneId(..) => ScreenContext::ScrollToBottomInPaneId,
+            ScreenInstruction::PageScrollUpInPaneId(..) => ScreenContext::PageScrollUpInPaneId,
+            ScreenInstruction::PageScrollDownInPaneId(..) => ScreenContext::PageScrollDownInPaneId,
+            ScreenInstruction::TogglePaneIdFullscreen(..) => ScreenContext::TogglePaneIdFullscreen,
+            ScreenInstruction::TogglePaneEmbedOrEjectForPaneId(..) => {
+                ScreenContext::TogglePaneEmbedOrEjectForPaneId
+            },
+            ScreenInstruction::CloseTabWithIndex(..) => ScreenContext::CloseTabWithIndex,
         }
     }
 }
@@ -1730,11 +1781,14 @@ impl Screen {
         if mode_info.session_name.as_ref() != Some(&self.session_name) {
             mode_info.session_name = Some(self.session_name.clone());
         }
-        let previous_mode = self
+
+        let previous_mode_info = self
             .mode_info
             .get(&client_id)
-            .unwrap_or(&self.default_mode_info)
-            .mode;
+            .unwrap_or(&self.default_mode_info);
+        let previous_mode = previous_mode_info.mode;
+        mode_info.style = previous_mode_info.style;
+        mode_info.capabilities = previous_mode_info.capabilities;
 
         let err_context = || {
             format!(
@@ -1905,7 +1959,7 @@ impl Screen {
                 tab_index_and_plugin_pane_id = Some((*tab_index, plugin_pane_id));
                 if move_to_focused_tab && focused_tab_index != *tab_index {
                     plugin_pane_to_move_to_active_tab =
-                        tab.extract_pane(plugin_pane_id, Some(client_id));
+                        tab.extract_pane(plugin_pane_id, false, Some(client_id));
                 }
 
                 break;
@@ -1976,6 +2030,35 @@ impl Screen {
         };
         Ok(())
     }
+    pub fn rerun_command_pane_with_id(&mut self, terminal_pane_id: u32) {
+        let mut found = false;
+        for tab in self.tabs.values_mut() {
+            if tab.has_pane_with_pid(&PaneId::Terminal(terminal_pane_id)) {
+                tab.rerun_terminal_pane_with_id(terminal_pane_id);
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            log::error!(
+                "Failed to find terminal pane with id: {} to run",
+                terminal_pane_id
+            );
+        }
+    }
+    pub fn resize_pane_with_id(&mut self, resize: ResizeStrategy, pane_id: PaneId) {
+        let mut found = false;
+        for tab in self.tabs.values_mut() {
+            if tab.has_pane_with_pid(&pane_id) {
+                tab.resize_pane_with_id(resize, pane_id);
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            log::error!("Failed to find pane with id: {:?} to resize", pane_id);
+        }
+    }
     pub fn break_pane(
         &mut self,
         default_shell: Option<TerminalAction>,
@@ -1992,7 +2075,7 @@ impl Screen {
                 .with_context(err_context)?;
             let pane_to_break_is_floating = active_tab.are_floating_panes_visible();
             let active_pane = active_tab
-                .close_pane(active_pane_id, false, Some(client_id))
+                .extract_pane(active_pane_id, false, Some(client_id))
                 .with_context(err_context)?;
             let active_pane_run_instruction = active_pane.invoked_with().clone();
             let tab_index = self.get_new_tab_index();
@@ -2053,7 +2136,7 @@ impl Screen {
                     .with_context(err_context)?;
                 let pane_to_break_is_floating = active_tab.are_floating_panes_visible();
                 let active_pane = active_tab
-                    .close_pane(active_pane_id, false, Some(client_id))
+                    .extract_pane(active_pane_id, false, Some(client_id))
                     .with_context(err_context)?;
                 (active_pane_id, active_pane, pane_to_break_is_floating)
             };
@@ -2158,33 +2241,71 @@ impl Screen {
         }
         Ok(())
     }
-    pub fn reconfigure_mode_info(
+    pub fn reconfigure(
         &mut self,
-        new_keybinds: Option<Keybinds>,
-        new_default_mode: Option<InputMode>,
+        new_keybinds: Keybinds,
+        new_default_mode: InputMode,
+        theme: Palette,
+        simplified_ui: bool,
+        default_shell: Option<PathBuf>,
+        pane_frames: bool,
+        copy_command: Option<String>,
+        copy_to_clipboard: Option<Clipboard>,
+        copy_on_select: bool,
+        auto_layout: bool,
+        rounded_corners: bool,
+        hide_session_name: bool,
         client_id: ClientId,
     ) -> Result<()> {
+        let should_support_arrow_fonts = !simplified_ui;
+
+        // global configuration
+        self.default_mode_info.update_theme(theme);
+        self.default_mode_info
+            .update_rounded_corners(rounded_corners);
+        self.default_shell = default_shell.clone();
+        self.auto_layout = auto_layout;
+        self.copy_options.command = copy_command.clone();
+        self.copy_options.copy_on_select = copy_on_select;
+        self.draw_pane_frames = pane_frames;
+        self.default_mode_info
+            .update_arrow_fonts(should_support_arrow_fonts);
+        self.default_mode_info
+            .update_hide_session_name(hide_session_name);
+        if let Some(copy_to_clipboard) = copy_to_clipboard {
+            self.copy_options.clipboard = copy_to_clipboard;
+        }
+        for tab in self.tabs.values_mut() {
+            tab.update_theme(theme);
+            tab.update_rounded_corners(rounded_corners);
+            tab.update_default_shell(default_shell.clone());
+            tab.update_auto_layout(auto_layout);
+            tab.update_copy_options(&self.copy_options);
+            tab.set_pane_frames(pane_frames);
+            tab.update_arrow_fonts(should_support_arrow_fonts);
+        }
+
+        // client specific configuration
         if self.connected_clients_contains(&client_id) {
-            let should_update_mode_info = new_keybinds.is_some() || new_default_mode.is_some();
             let mode_info = self
                 .mode_info
                 .entry(client_id)
                 .or_insert_with(|| self.default_mode_info.clone());
-            if let Some(new_keybinds) = new_keybinds {
-                mode_info.update_keybinds(new_keybinds);
+            mode_info.update_keybinds(new_keybinds);
+            mode_info.update_default_mode(new_default_mode);
+            mode_info.update_theme(theme);
+            mode_info.update_arrow_fonts(should_support_arrow_fonts);
+            mode_info.update_hide_session_name(hide_session_name);
+            for tab in self.tabs.values_mut() {
+                tab.change_mode_info(mode_info.clone(), client_id);
+                tab.mark_active_pane_for_rerender(client_id);
             }
-            if let Some(new_default_mode) = new_default_mode {
-                mode_info.update_default_mode(new_default_mode);
-            }
-            if should_update_mode_info {
-                for tab in self.tabs.values_mut() {
-                    tab.change_mode_info(mode_info.clone(), client_id);
-                    tab.mark_active_pane_for_rerender(client_id);
-                    tab.update_input_modes()?;
-                }
-            }
-        } else {
-            log::error!("Could not find client_id {client_id} to rebind keys");
+        }
+
+        // this needs to be done separately at the end because it applies some of the above changes
+        // and propagates them to plugins
+        for tab in self.tabs.values_mut() {
+            tab.update_input_modes()?;
         }
         Ok(())
     }
@@ -2341,10 +2462,11 @@ pub(crate) fn screen_thread_main(
     bus: Bus<ScreenInstruction>,
     max_panes: Option<usize>,
     client_attributes: ClientAttributes,
-    config_options: Box<Options>,
+    config: Config,
     debug: bool,
     default_layout: Box<Layout>,
 ) -> Result<()> {
+    let config_options = config.options;
     let arrow_fonts = !config_options.simplified_ui.unwrap_or_default();
     let draw_pane_frames = config_options.pane_frames.unwrap_or(true);
     let auto_layout = config_options.auto_layout.unwrap_or(true);
@@ -2383,7 +2505,7 @@ pub(crate) fn screen_thread_main(
                 //  ¯\_(ツ)_/¯
                 arrow_fonts: !arrow_fonts,
             },
-            &client_attributes.keybinds,
+            &config.keybinds,
             config_options.default_mode,
         ),
         draw_pane_frames,
@@ -2456,6 +2578,7 @@ pub(crate) fn screen_thread_main(
                 hold_for_command,
                 invoked_with,
                 floating_pane_coordinates,
+                start_suppressed,
                 client_or_tab_index,
             ) => {
                 match client_or_tab_index {
@@ -2466,6 +2589,7 @@ pub(crate) fn screen_thread_main(
                                should_float,
                                invoked_with,
                                floating_pane_coordinates,
+                               start_suppressed,
                                Some(client_id)
                            )
                         }, ?);
@@ -2491,6 +2615,7 @@ pub(crate) fn screen_thread_main(
                                 should_float,
                                 invoked_with,
                                 floating_pane_coordinates,
+                                start_suppressed,
                                 None,
                             )?;
                             if let Some(hold_for_command) = hold_for_command {
@@ -2510,11 +2635,35 @@ pub(crate) fn screen_thread_main(
 
                 screen.render(None)?;
             },
-            ScreenInstruction::OpenInPlaceEditor(pid, client_id) => {
-                active_tab!(screen, client_id, |tab: &mut Tab| tab
-                    .replace_active_pane_with_editor_pane(pid, client_id), ?);
-                screen.unblock_input()?;
-                screen.log_and_report_session_state()?;
+            ScreenInstruction::OpenInPlaceEditor(pid, client_tab_index_or_pane_id) => {
+                match client_tab_index_or_pane_id {
+                    ClientTabIndexOrPaneId::ClientId(client_id) => {
+                        active_tab!(screen, client_id, |tab: &mut Tab| tab
+                            .replace_active_pane_with_editor_pane(pid, client_id), ?);
+                        screen.unblock_input()?;
+                        screen.log_and_report_session_state()?;
+                    },
+                    ClientTabIndexOrPaneId::TabIndex(tab_index) => {
+                        log::error!("Cannot OpenInPlaceEditor with a TabIndex");
+                    },
+                    ClientTabIndexOrPaneId::PaneId(pane_id_to_replace) => {
+                        let mut found = false;
+                        let all_tabs = screen.get_tabs_mut();
+                        for tab in all_tabs.values_mut() {
+                            if tab.has_pane_with_pid(&pane_id_to_replace) {
+                                tab.replace_pane_with_editor_pane(pid, pane_id_to_replace);
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            log::error!(
+                                "Could not find pane with id {:?} to replace",
+                                pane_id_to_replace
+                            );
+                        }
+                    },
+                }
 
                 screen.render(None)?;
             },
@@ -2999,6 +3148,7 @@ pub(crate) fn screen_thread_main(
                         }
                     },
                 }
+
                 screen.unblock_input()?;
                 screen.log_and_report_session_state()?;
             },
@@ -3632,6 +3782,7 @@ pub(crate) fn screen_thread_main(
                 plugin_id,
                 pane_id_to_replace,
                 cwd,
+                start_suppressed,
                 client_id,
             ) => {
                 let pane_title = pane_title.unwrap_or_else(|| {
@@ -3676,6 +3827,7 @@ pub(crate) fn screen_thread_main(
                             should_float,
                             Some(run_plugin),
                             None,
+                            start_suppressed,
                             Some(client_id),
                         )
                     }, ?);
@@ -3688,6 +3840,7 @@ pub(crate) fn screen_thread_main(
                         should_float,
                         Some(run_plugin),
                         None,
+                        start_suppressed,
                         None,
                     )?;
                 } else {
@@ -4053,10 +4206,226 @@ pub(crate) fn screen_thread_main(
                 client_id,
                 keybinds,
                 default_mode,
+                theme,
+                simplified_ui,
+                default_shell,
+                pane_frames,
+                copy_to_clipboard,
+                copy_command,
+                copy_on_select,
+                auto_layout,
+                rounded_corners,
+                hide_session_name,
             } => {
                 screen
-                    .reconfigure_mode_info(keybinds, default_mode, client_id)
+                    .reconfigure(
+                        keybinds,
+                        default_mode,
+                        theme,
+                        simplified_ui,
+                        default_shell,
+                        pane_frames,
+                        copy_command,
+                        copy_to_clipboard,
+                        copy_on_select,
+                        auto_layout,
+                        rounded_corners,
+                        hide_session_name,
+                        client_id,
+                    )
                     .non_fatal();
+            },
+            ScreenInstruction::RerunCommandPane(terminal_pane_id) => {
+                screen.rerun_command_pane_with_id(terminal_pane_id)
+            },
+            ScreenInstruction::ResizePaneWithId(resize, pane_id) => {
+                screen.resize_pane_with_id(resize, pane_id)
+            },
+            ScreenInstruction::EditScrollbackForPaneWithId(pane_id) => {
+                let all_tabs = screen.get_tabs_mut();
+                for tab in all_tabs.values_mut() {
+                    if tab.has_pane_with_pid(&pane_id) {
+                        tab.edit_scrollback_for_pane_with_id(pane_id).non_fatal();
+                        break;
+                    }
+                }
+                screen.render(None)?;
+            },
+            ScreenInstruction::WriteToPaneId(bytes, pane_id) => {
+                let all_tabs = screen.get_tabs_mut();
+                for tab in all_tabs.values_mut() {
+                    if tab.has_pane_with_pid(&pane_id) {
+                        tab.write_to_pane_id(&None, bytes, false, pane_id, None)
+                            .non_fatal();
+                        break;
+                    }
+                }
+                screen.render(None)?;
+            },
+            ScreenInstruction::MovePaneWithPaneId(pane_id) => {
+                let all_tabs = screen.get_tabs_mut();
+                for tab in all_tabs.values_mut() {
+                    if tab.has_pane_with_pid(&pane_id) {
+                        tab.move_pane(pane_id);
+                        break;
+                    }
+                }
+                screen.render(None)?;
+            },
+            ScreenInstruction::MovePaneWithPaneIdInDirection(pane_id, direction) => {
+                let all_tabs = screen.get_tabs_mut();
+                for tab in all_tabs.values_mut() {
+                    if tab.has_pane_with_pid(&pane_id) {
+                        match direction {
+                            Direction::Down => tab.move_pane_down(pane_id),
+                            Direction::Up => tab.move_pane_up(pane_id),
+                            Direction::Left => tab.move_pane_left(pane_id),
+                            Direction::Right => tab.move_pane_right(pane_id),
+                        }
+                        break;
+                    }
+                }
+                screen.render(None)?;
+            },
+            ScreenInstruction::ClearScreenForPaneId(pane_id) => {
+                let all_tabs = screen.get_tabs_mut();
+                for tab in all_tabs.values_mut() {
+                    if tab.has_pane_with_pid(&pane_id) {
+                        tab.clear_screen_for_pane_id(pane_id);
+                        break;
+                    }
+                }
+                screen.render(None)?;
+            },
+            ScreenInstruction::ScrollUpInPaneId(pane_id) => {
+                let all_tabs = screen.get_tabs_mut();
+                for tab in all_tabs.values_mut() {
+                    if tab.has_pane_with_pid(&pane_id) {
+                        if let PaneId::Terminal(terminal_pane_id) = pane_id {
+                            tab.scroll_terminal_up(terminal_pane_id);
+                        } else {
+                            // this is because to do this with plugins, we need the client_id -
+                            // which we do not have (yet?) in this context...
+                            log::error!(
+                                "Currently only terminal panes are supported for scrolling up"
+                            );
+                        }
+                        break;
+                    }
+                }
+                screen.render(None)?;
+            },
+            ScreenInstruction::ScrollDownInPaneId(pane_id) => {
+                let all_tabs = screen.get_tabs_mut();
+                for tab in all_tabs.values_mut() {
+                    if tab.has_pane_with_pid(&pane_id) {
+                        if let PaneId::Terminal(terminal_pane_id) = pane_id {
+                            tab.scroll_terminal_down(terminal_pane_id);
+                        } else {
+                            // this is because to do this with plugins, we need the client_id -
+                            // which we do not have (yet?) in this context...
+                            log::error!(
+                                "Currently only terminal panes are supported for scrolling down"
+                            );
+                        }
+                        break;
+                    }
+                }
+                screen.render(None)?;
+            },
+            ScreenInstruction::ScrollToTopInPaneId(pane_id) => {
+                let all_tabs = screen.get_tabs_mut();
+                for tab in all_tabs.values_mut() {
+                    if tab.has_pane_with_pid(&pane_id) {
+                        if let PaneId::Terminal(terminal_pane_id) = pane_id {
+                            tab.scroll_terminal_to_top(terminal_pane_id);
+                        } else {
+                            // this is because to do this with plugins, we need the client_id -
+                            // which we do not have (yet?) in this context...
+                            log::error!(
+                                "Currently only terminal panes are supported for scrolling to top"
+                            );
+                        }
+                        break;
+                    }
+                }
+                screen.render(None)?;
+            },
+            ScreenInstruction::ScrollToBottomInPaneId(pane_id) => {
+                let all_tabs = screen.get_tabs_mut();
+                for tab in all_tabs.values_mut() {
+                    if tab.has_pane_with_pid(&pane_id) {
+                        if let PaneId::Terminal(terminal_pane_id) = pane_id {
+                            tab.scroll_terminal_to_bottom(terminal_pane_id);
+                        } else {
+                            // this is because to do this with plugins, we need the client_id -
+                            // which we do not have (yet?) in this context...
+                            log::error!("Currently only terminal panes are supported for scrolling to bottom");
+                        }
+                        break;
+                    }
+                }
+                screen.render(None)?;
+            },
+            ScreenInstruction::PageScrollUpInPaneId(pane_id) => {
+                let all_tabs = screen.get_tabs_mut();
+                for tab in all_tabs.values_mut() {
+                    if tab.has_pane_with_pid(&pane_id) {
+                        if let PaneId::Terminal(terminal_pane_id) = pane_id {
+                            tab.scroll_terminal_page_up(terminal_pane_id);
+                        } else {
+                            // this is because to do this with plugins, we need the client_id -
+                            // which we do not have (yet?) in this context...
+                            log::error!(
+                                "Currently only terminal panes are supported for scrolling"
+                            );
+                        }
+                        break;
+                    }
+                }
+                screen.render(None)?;
+            },
+            ScreenInstruction::PageScrollDownInPaneId(pane_id) => {
+                let all_tabs = screen.get_tabs_mut();
+                for tab in all_tabs.values_mut() {
+                    if tab.has_pane_with_pid(&pane_id) {
+                        if let PaneId::Terminal(terminal_pane_id) = pane_id {
+                            tab.scroll_terminal_page_down(terminal_pane_id);
+                        } else {
+                            // this is because to do this with plugins, we need the client_id -
+                            // which we do not have (yet?) in this context...
+                            log::error!(
+                                "Currently only terminal panes are supported for scrolling"
+                            );
+                        }
+                        break;
+                    }
+                }
+                screen.render(None)?;
+            },
+            ScreenInstruction::TogglePaneIdFullscreen(pane_id) => {
+                let all_tabs = screen.get_tabs_mut();
+                for tab in all_tabs.values_mut() {
+                    if tab.has_pane_with_pid(&pane_id) {
+                        tab.toggle_pane_fullscreen(pane_id);
+                        break;
+                    }
+                }
+                screen.render(None)?;
+            },
+            ScreenInstruction::TogglePaneEmbedOrEjectForPaneId(pane_id) => {
+                let all_tabs = screen.get_tabs_mut();
+                for tab in all_tabs.values_mut() {
+                    if tab.has_pane_with_pid(&pane_id) {
+                        tab.toggle_pane_embed_or_floating_for_pane_id(pane_id)
+                            .non_fatal();
+                        break;
+                    }
+                }
+                screen.render(None)?;
+            },
+            ScreenInstruction::CloseTabWithIndex(tab_index) => {
+                screen.close_tab_at_index(tab_index).non_fatal()
             },
         }
     }

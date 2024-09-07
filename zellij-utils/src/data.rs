@@ -120,7 +120,7 @@ impl fmt::Display for KeyWithModifier {
                     .iter()
                     .map(|m| m.to_string())
                     .collect::<Vec<_>>()
-                    .join("-"),
+                    .join(" "),
                 self.bare_key
             )
         }
@@ -915,7 +915,12 @@ pub enum Event {
     // context
     CommandPaneOpened(u32, Context), // u32 - terminal_pane_id
     CommandPaneExited(u32, Option<i32>, Context), // u32 - terminal_pane_id, Option<i32> -
-                                     // exit_code
+    // exit_code
+    PaneClosed(PaneId),
+    EditPaneOpened(u32, Context),              // u32 - terminal_pane_id
+    EditPaneExited(u32, Option<i32>, Context), // u32 - terminal_pane_id, Option<i32> - exit code
+    CommandPaneReRun(u32, Context),            // u32 - terminal_pane_id, Option<i32> -
+    FailedToWriteConfigToDisk(Option<String>), // String -> the file path we failed to write
 }
 
 #[derive(
@@ -1169,6 +1174,20 @@ impl ModeInfo {
     }
     pub fn update_default_mode(&mut self, new_default_mode: InputMode) {
         self.base_mode = Some(new_default_mode);
+    }
+    pub fn update_theme(&mut self, theme: Palette) {
+        self.style.colors = theme;
+    }
+    pub fn update_rounded_corners(&mut self, rounded_corners: bool) {
+        self.style.rounded_corners = rounded_corners;
+    }
+    pub fn update_arrow_fonts(&mut self, should_support_arrow_fonts: bool) {
+        // it is honestly quite baffling to me how "arrow_fonts: false" can mean "I support arrow
+        // fonts", but since this is a public API... ¯\_(ツ)_/¯
+        self.capabilities.arrow_fonts = !should_support_arrow_fonts;
+    }
+    pub fn update_hide_session_name(&mut self, hide_session_name: bool) {
+        self.style.hide_session_name = hide_session_name;
     }
 }
 
@@ -1446,7 +1465,7 @@ pub struct NewPluginArgs {
     pub skip_cache: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PaneId {
     Terminal(u32),
     Plugin(u32),
@@ -1702,8 +1721,8 @@ pub enum PluginCommand {
     SetSelectable(bool),
     GetPluginIds,
     GetZellijVersion,
-    OpenFile(FileToOpen),
-    OpenFileFloating(FileToOpen, Option<FloatingPaneCoordinates>),
+    OpenFile(FileToOpen, Context),
+    OpenFileFloating(FileToOpen, Option<FloatingPaneCoordinates>, Context),
     OpenTerminal(FileToOpen), // only used for the path as cwd
     OpenTerminalFloating(FileToOpen, Option<FloatingPaneCoordinates>), // only used for the path as cwd
     OpenCommandPane(CommandToRun, Context),
@@ -1768,7 +1787,7 @@ pub enum PluginCommand {
     DeleteDeadSession(String),       // String -> session name
     DeleteAllDeadSessions,           // String -> session name
     OpenTerminalInPlace(FileToOpen), // only used for the path as cwd
-    OpenFileInPlace(FileToOpen),
+    OpenFileInPlace(FileToOpen, Context),
     OpenCommandPaneInPlace(CommandToRun, Context),
     RunCommand(
         Vec<String>,              // command
@@ -1795,7 +1814,26 @@ pub enum PluginCommand {
     DumpSessionLayout,
     CloseSelf,
     NewTabsWithLayoutInfo(LayoutInfo),
-    Reconfigure(String), // String -> stringified configuration
+    Reconfigure(String, bool), // String -> stringified configuration, bool -> save configuration
+    // file to disk
     HidePaneWithId(PaneId),
     ShowPaneWithId(PaneId, bool), // bool -> should_float_if_hidden
+    OpenCommandPaneBackground(CommandToRun, Context),
+    RerunCommandPane(u32), // u32  - terminal pane id
+    ResizePaneIdWithDirection(ResizeStrategy, PaneId),
+    EditScrollbackForPaneWithId(PaneId),
+    WriteToPaneId(Vec<u8>, PaneId),
+    WriteCharsToPaneId(String, PaneId),
+    MovePaneWithPaneId(PaneId),
+    MovePaneWithPaneIdInDirection(PaneId, Direction),
+    ClearScreenForPaneId(PaneId),
+    ScrollUpInPaneId(PaneId),
+    ScrollDownInPaneId(PaneId),
+    ScrollToTopInPaneId(PaneId),
+    ScrollToBottomInPaneId(PaneId),
+    PageScrollUpInPaneId(PaneId),
+    PageScrollDownInPaneId(PaneId),
+    TogglePaneIdFullscreen(PaneId),
+    TogglePaneEmbedOrEjectForPaneId(PaneId),
+    CloseTabWithIndex(usize), // usize - tab_index
 }

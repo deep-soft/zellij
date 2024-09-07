@@ -1155,7 +1155,7 @@ impl Grid {
         self.mark_for_rerender();
     }
     /// Dumps all lines above terminal vieport and the viewport itself to a string
-    pub fn dump_screen(&mut self, full: bool) -> String {
+    pub fn dump_screen(&self, full: bool) -> String {
         let viewport: String = dump_screen!(self.viewport);
         if !full {
             return viewport;
@@ -2154,6 +2154,12 @@ impl Grid {
     }
     pub fn unlock_renders(&mut self) {
         self.lock_renders = false;
+    }
+    pub fn update_theme(&mut self, theme: Palette) {
+        self.style.colors = theme.clone();
+    }
+    pub fn update_arrow_fonts(&mut self, should_support_arrow_fonts: bool) {
+        self.arrow_fonts = should_support_arrow_fonts;
     }
 }
 

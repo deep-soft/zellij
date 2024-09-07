@@ -93,23 +93,6 @@ pub(crate) fn route_action(
         },
         Action::SwitchToMode(mode) => {
             let attrs = &client_attributes;
-            // TODO: use the palette from the client and remove it from the server os api
-            // this is left here as a stop gap measure until we shift some code around
-            // to allow for this
-            // TODO: Need access to `ClientAttributes` here
-            senders
-                .send_to_plugin(PluginInstruction::Update(vec![(
-                    None,
-                    Some(client_id),
-                    Event::ModeUpdate(get_mode_info(
-                        mode,
-                        attrs,
-                        capabilities,
-                        &client_keybinds,
-                        Some(default_mode),
-                    )),
-                )]))
-                .with_context(err_context)?;
             senders
                 .send_to_server(ServerInstruction::ChangeMode(client_id, mode))
                 .with_context(err_context)?;
@@ -274,7 +257,7 @@ pub(crate) fn route_action(
                 .send_to_screen(ScreenInstruction::TogglePaneFrames)
                 .with_context(err_context)?;
         },
-        Action::NewPane(direction, name) => {
+        Action::NewPane(direction, name, start_suppressed) => {
             let shell = default_shell.clone();
             let pty_instr = match direction {
                 Some(Direction::Left) => {
@@ -295,22 +278,22 @@ pub(crate) fn route_action(
                     None,
                     name,
                     None,
+                    start_suppressed,
                     ClientTabIndexOrPaneId::ClientId(client_id),
                 ),
             };
             senders.send_to_pty(pty_instr).with_context(err_context)?;
         },
         Action::EditFile(
-            path_to_file,
-            line_number,
-            cwd,
+            open_file_payload,
             split_direction,
             should_float,
             should_open_in_place,
+            start_suppressed,
             floating_pane_coordinates,
         ) => {
-            let title = format!("Editing: {}", path_to_file.display());
-            let open_file = TerminalAction::OpenFile(path_to_file, line_number, cwd);
+            let title = format!("Editing: {}", open_file_payload.path.display());
+            let open_file = TerminalAction::OpenFile(open_file_payload);
             let pty_instr = match (split_direction, should_float, should_open_in_place) {
                 (Some(Direction::Left), false, false) => {
                     PtyInstruction::SpawnTerminalVertically(Some(open_file), Some(title), client_id)
@@ -348,6 +331,7 @@ pub(crate) fn route_action(
                     Some(should_float),
                     Some(title),
                     floating_pane_coordinates,
+                    start_suppressed,
                     ClientTabIndexOrPaneId::ClientId(client_id),
                 ),
             };
@@ -394,6 +378,7 @@ pub(crate) fn route_action(
                     Some(should_float),
                     name,
                     floating_pane_coordinates,
+                    false,
                     ClientTabIndexOrPaneId::ClientId(client_id),
                 ))
                 .with_context(err_context)?;
@@ -447,6 +432,7 @@ pub(crate) fn route_action(
                     Some(should_float),
                     name,
                     None,
+                    false,
                     ClientTabIndexOrPaneId::ClientId(client_id),
                 ),
             };
@@ -496,6 +482,7 @@ pub(crate) fn route_action(
                     None,
                     None,
                     None,
+                    false,
                     ClientTabIndexOrPaneId::ClientId(client_id),
                 ),
             };
@@ -934,12 +921,13 @@ pub(crate) fn route_action(
             cwd,
             pane_title,
             launch_new,
+            plugin_id,
             ..
         } => {
             if let Some(name) = name.take() {
                 let should_open_in_place = in_place.unwrap_or(false);
                 let pane_id_to_replace = if should_open_in_place { pane_id } else { None };
-                if launch_new {
+                if launch_new && plugin_id.is_none() {
                     // we do this to make sure the plugin is unique (has a unique configuration parameter)
                     configuration
                         .get_or_insert_with(BTreeMap::new)
@@ -958,6 +946,7 @@ pub(crate) fn route_action(
                         pane_title,
                         skip_cache,
                         cli_client_id: client_id,
+                        plugin_and_client_id: plugin_id.map(|plugin_id| (plugin_id, client_id)),
                     })
                     .with_context(err_context)?;
             } else {
@@ -1041,19 +1030,13 @@ pub(crate) fn route_thread_main(
                                                 rlocked_sessions.default_shell.clone(),
                                                 rlocked_sessions.layout.clone(),
                                                 Some(&mut seen_cli_pipes),
+                                                keybinds.clone(),
                                                 rlocked_sessions
-                                                    .client_keybinds
-                                                    .get(&client_id)
-                                                    .unwrap_or(
-                                                        &rlocked_sessions
-                                                            .client_attributes
-                                                            .keybinds,
-                                                    )
-                                                    .clone(),
-                                                rlocked_sessions
+                                                    .session_configuration
+                                                    .get_client_configuration(&client_id)
+                                                    .options
                                                     .default_mode
-                                                    .get(&client_id)
-                                                    .unwrap_or(&InputMode::Normal)
+                                                    .unwrap_or(InputMode::Normal)
                                                     .clone(),
                                             )? {
                                                 should_break = true;
@@ -1080,14 +1063,15 @@ pub(crate) fn route_thread_main(
                                     rlocked_sessions.layout.clone(),
                                     Some(&mut seen_cli_pipes),
                                     rlocked_sessions
-                                        .client_keybinds
-                                        .get(&client_id)
-                                        .unwrap_or(&rlocked_sessions.client_attributes.keybinds)
+                                        .session_configuration
+                                        .get_client_keybinds(&client_id)
                                         .clone(),
                                     rlocked_sessions
+                                        .session_configuration
+                                        .get_client_configuration(&client_id)
+                                        .options
                                         .default_mode
-                                        .get(&client_id)
-                                        .unwrap_or(&InputMode::Normal)
+                                        .unwrap_or(InputMode::Normal)
                                         .clone(),
                                 )? {
                                     should_break = true;
@@ -1160,16 +1144,20 @@ pub(crate) fn route_thread_main(
                         ClientToServerMsg::NewClient(
                             client_attributes,
                             cli_args,
-                            opts,
+                            config,
+                            runtime_config_options,
                             layout,
                             plugin_aliases,
+                            should_launch_setup_wizard,
                         ) => {
                             let new_client_instruction = ServerInstruction::NewClient(
                                 client_attributes,
                                 cli_args,
-                                opts,
+                                config,
+                                runtime_config_options,
                                 layout,
                                 plugin_aliases,
+                                should_launch_setup_wizard,
                                 client_id,
                             );
                             to_server
@@ -1178,13 +1166,15 @@ pub(crate) fn route_thread_main(
                         },
                         ClientToServerMsg::AttachClient(
                             client_attributes,
-                            opts,
+                            config,
+                            runtime_config_options,
                             tab_position_to_focus,
                             pane_id_to_focus,
                         ) => {
                             let attach_client_instruction = ServerInstruction::AttachClient(
                                 client_attributes,
-                                opts,
+                                config,
+                                runtime_config_options,
                                 tab_position_to_focus,
                                 pane_id_to_focus,
                                 client_id,
@@ -1214,6 +1204,16 @@ pub(crate) fn route_thread_main(
                         },
                         ClientToServerMsg::ListClients => {
                             let _ = to_server.send(ServerInstruction::ActiveClients(client_id));
+                        },
+                        ClientToServerMsg::ConfigWrittenToDisk(config) => {
+                            let _ = to_server
+                                .send(ServerInstruction::ConfigWrittenToDisk(client_id, config));
+                        },
+                        ClientToServerMsg::FailedToWriteConfigToDisk(failed_path) => {
+                            let _ = to_server.send(ServerInstruction::FailedToWriteConfigToDisk(
+                                client_id,
+                                failed_path,
+                            ));
                         },
                     }
                     Ok(should_break)

@@ -104,7 +104,9 @@ pub struct WasmBridge {
     pending_pipes: PendingPipes,
     layout_dir: Option<PathBuf>,
     default_mode: InputMode,
+    default_keybinds: Keybinds,
     keybinds: HashMap<ClientId, Keybinds>,
+    base_modes: HashMap<ClientId, InputMode>,
 }
 
 impl WasmBridge {
@@ -120,6 +122,7 @@ impl WasmBridge {
         default_layout: Box<Layout>,
         layout_dir: Option<PathBuf>,
         default_mode: InputMode,
+        default_keybinds: Keybinds,
     ) -> Self {
         let plugin_map = Arc::new(Mutex::new(PluginMap::default()));
         let connected_clients: Arc<Mutex<Vec<ClientId>>> = Arc::new(Mutex::new(vec![]));
@@ -151,7 +154,9 @@ impl WasmBridge {
             pending_pipes: Default::default(),
             layout_dir,
             default_mode,
+            default_keybinds,
             keybinds: HashMap::new(),
+            base_modes: HashMap::new(),
         }
     }
     pub fn load_plugin(
@@ -208,8 +213,16 @@ impl WasmBridge {
                     let default_shell = self.default_shell.clone();
                     let default_layout = self.default_layout.clone();
                     let layout_dir = self.layout_dir.clone();
-                    let default_mode = self.default_mode;
-                    let keybinds = self.keybinds.get(&client_id).cloned();
+                    let default_mode = self
+                        .base_modes
+                        .get(&client_id)
+                        .copied()
+                        .unwrap_or(self.default_mode);
+                    let keybinds = self
+                        .keybinds
+                        .get(&client_id)
+                        .cloned()
+                        .unwrap_or_else(|| self.default_keybinds.clone());
                     async move {
                         let _ = senders.send_to_background_jobs(
                             BackgroundJob::AnimatePluginLoading(plugin_id),
@@ -350,7 +363,7 @@ impl WasmBridge {
             let default_shell = self.default_shell.clone();
             let default_layout = self.default_layout.clone();
             let layout_dir = self.layout_dir.clone();
-            let default_mode = self.default_mode;
+            let base_modes = self.base_modes.clone();
             let keybinds = self.keybinds.clone();
             async move {
                 match PluginLoader::reload_plugin(
@@ -369,7 +382,7 @@ impl WasmBridge {
                     default_shell.clone(),
                     default_layout.clone(),
                     layout_dir.clone(),
-                    default_mode,
+                    &base_modes,
                     &keybinds,
                 ) {
                     Ok(_) => {
@@ -396,7 +409,7 @@ impl WasmBridge {
                                 default_shell.clone(),
                                 default_layout.clone(),
                                 layout_dir.clone(),
-                                default_mode,
+                                &base_modes,
                                 &keybinds,
                             ) {
                                 Ok(_) => handle_plugin_successful_loading(&senders, *plugin_id),
@@ -451,7 +464,10 @@ impl WasmBridge {
             self.default_layout.clone(),
             self.layout_dir.clone(),
             self.default_mode,
-            self.keybinds.get(&client_id).cloned(),
+            self.keybinds
+                .get(&client_id)
+                .cloned()
+                .unwrap_or_else(|| self.default_keybinds.clone()),
         ) {
             Ok(_) => {
                 let _ = self
@@ -810,6 +826,7 @@ impl WasmBridge {
         client_id: ClientId,
         keybinds: Option<Keybinds>,
         default_mode: Option<InputMode>,
+        default_shell: Option<TerminalAction>,
     ) -> Result<()> {
         let plugins_to_reconfigure: Vec<Arc<Mutex<RunningPlugin>>> = self
             .plugin_map
@@ -827,15 +844,17 @@ impl WasmBridge {
             })
             .collect();
         if let Some(default_mode) = default_mode.as_ref() {
-            self.default_mode = *default_mode;
+            self.base_modes.insert(client_id, *default_mode);
         }
         if let Some(keybinds) = keybinds.as_ref() {
             self.keybinds.insert(client_id, keybinds.clone());
         }
+        self.default_shell = default_shell.clone();
         for running_plugin in plugins_to_reconfigure {
             task::spawn({
                 let running_plugin = running_plugin.clone();
                 let keybinds = keybinds.clone();
+                let default_shell = default_shell.clone();
                 async move {
                     let mut running_plugin = running_plugin.lock().unwrap();
                     if let Some(keybinds) = keybinds {
@@ -844,6 +863,7 @@ impl WasmBridge {
                     if let Some(default_mode) = default_mode {
                         running_plugin.update_default_mode(default_mode);
                     }
+                    running_plugin.update_default_shell(default_shell);
                 }
             });
         }
@@ -1193,6 +1213,7 @@ impl WasmBridge {
                         cli_client_id,
                     ) {
                         Ok((plugin_id, client_id)) => {
+                            let start_suppressed = false;
                             drop(self.senders.send_to_screen(ScreenInstruction::AddPlugin(
                                 Some(should_float),
                                 should_be_open_in_place,
@@ -1202,6 +1223,7 @@ impl WasmBridge {
                                 plugin_id,
                                 pane_id_to_replace,
                                 cwd,
+                                start_suppressed,
                                 Some(client_id),
                             )));
                             vec![(plugin_id, Some(client_id))]
@@ -1268,6 +1290,17 @@ impl WasmBridge {
             || (message_cid.is_none() && message_pid == Some(*plugin_id))
             || (message_cid == Some(*client_id) && message_pid == Some(*plugin_id))
     }
+    pub fn client_is_connected(&self, client_id: &ClientId) -> bool {
+        self.connected_clients.lock().unwrap().contains(client_id)
+    }
+    pub fn get_first_client_id(&self) -> Option<ClientId> {
+        self.connected_clients
+            .lock()
+            .unwrap()
+            .iter()
+            .next()
+            .copied()
+    }
 }
 
 fn handle_plugin_successful_loading(senders: &ThreadSenders, plugin_id: PluginId) {
@@ -1316,6 +1349,11 @@ fn check_event_permission(
         | Event::SystemClipboardFailure
         | Event::CommandPaneOpened(..)
         | Event::CommandPaneExited(..)
+        | Event::PaneClosed(..)
+        | Event::EditPaneOpened(..)
+        | Event::EditPaneExited(..)
+        | Event::FailedToWriteConfigToDisk(..)
+        | Event::CommandPaneReRun(..)
         | Event::InputReceived => PermissionType::ReadApplicationState,
         _ => return (PermissionStatus::Granted, None),
     };

@@ -166,10 +166,13 @@ impl ZellijPlugin for State {
                     start_or_reload_plugin(plugin_url)
                 },
                 BareKey::Char('g') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
-                    open_file(FileToOpen {
-                        path: std::path::PathBuf::from("/path/to/my/file.rs"),
-                        ..Default::default()
-                    });
+                    open_file(
+                        FileToOpen {
+                            path: std::path::PathBuf::from("/path/to/my/file.rs"),
+                            ..Default::default()
+                        },
+                        BTreeMap::new(),
+                    );
                 },
                 BareKey::Char('h') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
                     open_file_floating(
@@ -178,14 +181,18 @@ impl ZellijPlugin for State {
                             ..Default::default()
                         },
                         None,
+                        BTreeMap::new(),
                     );
                 },
                 BareKey::Char('i') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
-                    open_file(FileToOpen {
-                        path: std::path::PathBuf::from("/path/to/my/file.rs"),
-                        line_number: Some(42),
-                        ..Default::default()
-                    });
+                    open_file(
+                        FileToOpen {
+                            path: std::path::PathBuf::from("/path/to/my/file.rs"),
+                            line_number: Some(42),
+                            ..Default::default()
+                        },
+                        BTreeMap::new(),
+                    );
                 },
                 BareKey::Char('j') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
                     open_file_floating(
@@ -195,6 +202,7 @@ impl ZellijPlugin for State {
                             ..Default::default()
                         },
                         None,
+                        BTreeMap::new(),
                     );
                 },
                 BareKey::Char('k') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
@@ -324,6 +332,7 @@ impl ZellijPlugin for State {
                     );
                 },
                 BareKey::Char('0') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
+                    let write_to_disk = true;
                     reconfigure(
                         "
                         keybinds {
@@ -333,7 +342,78 @@ impl ZellijPlugin for State {
                         }
                     "
                         .to_owned(),
+                        write_to_disk,
                     );
+                },
+                BareKey::Char('a') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    hide_pane_with_id(PaneId::Terminal(1));
+                },
+                BareKey::Char('b') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    show_pane_with_id(PaneId::Terminal(1), true);
+                },
+                BareKey::Char('c') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    open_command_pane_background(
+                        CommandToRun {
+                            path: std::path::PathBuf::from("/path/to/my/file.rs"),
+                            args: vec!["arg1".to_owned(), "arg2".to_owned()],
+                            ..Default::default()
+                        },
+                        BTreeMap::new(),
+                    );
+                },
+                BareKey::Char('d') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    rerun_command_pane(1);
+                },
+                BareKey::Char('e') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    resize_pane_with_id(
+                        ResizeStrategy::new(Resize::Increase, Some(Direction::Left)),
+                        PaneId::Terminal(2),
+                    );
+                },
+                BareKey::Char('f') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    edit_scrollback_for_pane_with_id(PaneId::Terminal(2));
+                },
+                BareKey::Char('g') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    write_to_pane_id(vec![102, 111, 111], PaneId::Terminal(2));
+                },
+                BareKey::Char('h') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    write_chars_to_pane_id("foo\n", PaneId::Terminal(2));
+                },
+                BareKey::Char('i') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    move_pane_with_pane_id(PaneId::Terminal(2));
+                },
+                BareKey::Char('j') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    move_pane_with_pane_id_in_direction(PaneId::Terminal(2), Direction::Left);
+                },
+                BareKey::Char('k') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    clear_screen_for_pane_id(PaneId::Terminal(2));
+                },
+                BareKey::Char('l') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    scroll_up_in_pane_id(PaneId::Terminal(2));
+                },
+                BareKey::Char('m') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    scroll_down_in_pane_id(PaneId::Terminal(2));
+                },
+                BareKey::Char('n') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    scroll_to_top_in_pane_id(PaneId::Terminal(2));
+                },
+                BareKey::Char('o') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    scroll_to_bottom_in_pane_id(PaneId::Terminal(2));
+                },
+                BareKey::Char('p') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    page_scroll_up_in_pane_id(PaneId::Terminal(2));
+                },
+                BareKey::Char('q') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    page_scroll_down_in_pane_id(PaneId::Terminal(2));
+                },
+                BareKey::Char('r') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    toggle_pane_id_fullscreen(PaneId::Terminal(2));
+                },
+                BareKey::Char('s') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    toggle_pane_embed_or_eject_for_pane_id(PaneId::Terminal(2));
+                },
+                BareKey::Char('t') if key.has_modifiers(&[KeyModifier::Alt]) => {
+                    close_tab_with_index(2);
                 },
                 _ => {},
             },
