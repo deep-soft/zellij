@@ -3,19 +3,21 @@ pub use super::generated_api::api::{
     event::{EventNameList as ProtobufEventNameList, Header},
     input_mode::InputMode as ProtobufInputMode,
     plugin_command::{
-        plugin_command::Payload, ClearScreenForPaneIdPayload, CliPipeOutputPayload,
-        CloseTabWithIndexPayload, CommandName, ContextItem, EditScrollbackForPaneWithIdPayload,
-        EnvVariable, ExecCmdPayload, FixedOrPercent as ProtobufFixedOrPercent,
+        plugin_command::Payload, BreakPanesToNewTabPayload, BreakPanesToTabWithIndexPayload,
+        ClearScreenForPaneIdPayload, CliPipeOutputPayload, CloseTabWithIndexPayload, CommandName,
+        ContextItem, EditScrollbackForPaneWithIdPayload, EnvVariable, ExecCmdPayload,
+        FixedOrPercent as ProtobufFixedOrPercent,
         FixedOrPercentValue as ProtobufFixedOrPercentValue,
         FloatingPaneCoordinates as ProtobufFloatingPaneCoordinates, HidePaneWithIdPayload,
-        HttpVerb as ProtobufHttpVerb, IdAndNewName, KillSessionsPayload, MessageToPluginPayload,
-        MovePaneWithPaneIdInDirectionPayload, MovePaneWithPaneIdPayload, MovePayload,
-        NewPluginArgs as ProtobufNewPluginArgs, NewTabsWithLayoutInfoPayload,
-        OpenCommandPanePayload, OpenFilePayload, PageScrollDownInPaneIdPayload,
-        PageScrollUpInPaneIdPayload, PaneId as ProtobufPaneId, PaneType as ProtobufPaneType,
-        PluginCommand as ProtobufPluginCommand, PluginMessagePayload, ReconfigurePayload,
-        RequestPluginPermissionPayload, RerunCommandPanePayload, ResizePaneIdWithDirectionPayload,
-        ResizePayload, RunCommandPayload, ScrollDownInPaneIdPayload, ScrollToBottomInPaneIdPayload,
+        HttpVerb as ProtobufHttpVerb, IdAndNewName, KeyToRebind, KeyToUnbind, KillSessionsPayload,
+        LoadNewPluginPayload, MessageToPluginPayload, MovePaneWithPaneIdInDirectionPayload,
+        MovePaneWithPaneIdPayload, MovePayload, NewPluginArgs as ProtobufNewPluginArgs,
+        NewTabsWithLayoutInfoPayload, OpenCommandPanePayload, OpenFilePayload,
+        PageScrollDownInPaneIdPayload, PageScrollUpInPaneIdPayload, PaneId as ProtobufPaneId,
+        PaneType as ProtobufPaneType, PluginCommand as ProtobufPluginCommand, PluginMessagePayload,
+        RebindKeysPayload, ReconfigurePayload, ReloadPluginPayload, RequestPluginPermissionPayload,
+        RerunCommandPanePayload, ResizePaneIdWithDirectionPayload, ResizePayload,
+        RunCommandPayload, ScrollDownInPaneIdPayload, ScrollToBottomInPaneIdPayload,
         ScrollToTopInPaneIdPayload, ScrollUpInPaneIdPayload, SetTimeoutPayload,
         ShowPaneWithIdPayload, SubscribePayload, SwitchSessionPayload, SwitchTabToPayload,
         TogglePaneEmbedOrEjectForPaneIdPayload, TogglePaneIdFullscreenPayload, UnsubscribePayload,
@@ -26,9 +28,10 @@ pub use super::generated_api::api::{
 };
 
 use crate::data::{
-    ConnectToSession, FloatingPaneCoordinates, HttpVerb, MessageToPlugin, NewPluginArgs, PaneId,
-    PermissionType, PluginCommand,
+    ConnectToSession, FloatingPaneCoordinates, HttpVerb, InputMode, KeyWithModifier,
+    MessageToPlugin, NewPluginArgs, PaneId, PermissionType, PluginCommand,
 };
+use crate::input::actions::Action;
 use crate::input::layout::SplitSize;
 
 use std::collections::BTreeMap;
@@ -180,6 +183,60 @@ impl TryFrom<PaneId> for ProtobufPaneId {
             }),
         }
     }
+}
+
+impl TryFrom<(InputMode, KeyWithModifier, Vec<Action>)> for KeyToRebind {
+    type Error = &'static str;
+    fn try_from(
+        key_to_rebind: (InputMode, KeyWithModifier, Vec<Action>),
+    ) -> Result<Self, &'static str> {
+        Ok(KeyToRebind {
+            input_mode: key_to_rebind.0 as i32,
+            key: Some(key_to_rebind.1.try_into()?),
+            actions: key_to_rebind
+                .2
+                .into_iter()
+                .filter_map(|a| a.try_into().ok())
+                .collect(),
+        })
+    }
+}
+
+impl TryFrom<(InputMode, KeyWithModifier)> for KeyToUnbind {
+    type Error = &'static str;
+    fn try_from(key_to_unbind: (InputMode, KeyWithModifier)) -> Result<Self, &'static str> {
+        Ok(KeyToUnbind {
+            input_mode: key_to_unbind.0 as i32,
+            key: Some(key_to_unbind.1.try_into()?),
+        })
+    }
+}
+
+fn key_to_rebind_to_plugin_command_assets(
+    key_to_rebind: KeyToRebind,
+) -> Option<(InputMode, KeyWithModifier, Vec<Action>)> {
+    Some((
+        ProtobufInputMode::from_i32(key_to_rebind.input_mode)?
+            .try_into()
+            .ok()?,
+        key_to_rebind.key?.try_into().ok()?,
+        key_to_rebind
+            .actions
+            .into_iter()
+            .filter_map(|a| a.try_into().ok())
+            .collect(),
+    ))
+}
+
+fn key_to_unbind_to_plugin_command_assets(
+    key_to_unbind: KeyToUnbind,
+) -> Option<(InputMode, KeyWithModifier)> {
+    Some((
+        ProtobufInputMode::from_i32(key_to_unbind.input_mode)?
+            .try_into()
+            .ok()?,
+        key_to_unbind.key?.try_into().ok()?,
+    ))
 }
 
 impl TryFrom<ProtobufPluginCommand> for PluginCommand {
@@ -1174,6 +1231,74 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                 ),
                 _ => Err("Mismatched payload for CloseTabWithIndex"),
             },
+            Some(CommandName::BreakPanesToNewTab) => match protobuf_plugin_command.payload {
+                Some(Payload::BreakPanesToNewTabPayload(break_panes_to_new_tab_payload)) => {
+                    Ok(PluginCommand::BreakPanesToNewTab(
+                        break_panes_to_new_tab_payload
+                            .pane_ids
+                            .into_iter()
+                            .filter_map(|p_id| p_id.try_into().ok())
+                            .collect(),
+                        break_panes_to_new_tab_payload.new_tab_name,
+                        break_panes_to_new_tab_payload.should_change_focus_to_new_tab,
+                    ))
+                },
+                _ => Err("Mismatched payload for BreakPanesToNewTab"),
+            },
+            Some(CommandName::BreakPanesToTabWithIndex) => match protobuf_plugin_command.payload {
+                Some(Payload::BreakPanesToTabWithIndexPayload(
+                    break_panes_to_tab_with_index_payload,
+                )) => Ok(PluginCommand::BreakPanesToTabWithIndex(
+                    break_panes_to_tab_with_index_payload
+                        .pane_ids
+                        .into_iter()
+                        .filter_map(|p_id| p_id.try_into().ok())
+                        .collect(),
+                    break_panes_to_tab_with_index_payload.tab_index as usize,
+                    break_panes_to_tab_with_index_payload.should_change_focus_to_target_tab,
+                )),
+                _ => Err("Mismatched payload for BreakPanesToTabWithIndex"),
+            },
+            Some(CommandName::ReloadPlugin) => match protobuf_plugin_command.payload {
+                Some(Payload::ReloadPluginPayload(reload_plugin_payload)) => {
+                    Ok(PluginCommand::ReloadPlugin(reload_plugin_payload.plugin_id))
+                },
+                _ => Err("Mismatched payload for ReloadPlugin"),
+            },
+            Some(CommandName::LoadNewPlugin) => match protobuf_plugin_command.payload {
+                Some(Payload::LoadNewPluginPayload(load_new_plugin_payload)) => {
+                    Ok(PluginCommand::LoadNewPlugin {
+                        url: load_new_plugin_payload.plugin_url,
+                        config: load_new_plugin_payload
+                            .plugin_config
+                            .into_iter()
+                            .map(|e| (e.name, e.value))
+                            .collect(),
+                        load_in_background: load_new_plugin_payload
+                            .should_load_plugin_in_background,
+                        skip_plugin_cache: load_new_plugin_payload.should_skip_plugin_cache,
+                    })
+                },
+                _ => Err("Mismatched payload for LoadNewPlugin"),
+            },
+            Some(CommandName::RebindKeys) => match protobuf_plugin_command.payload {
+                Some(Payload::RebindKeysPayload(rebind_keys_payload)) => {
+                    Ok(PluginCommand::RebindKeys {
+                        keys_to_rebind: rebind_keys_payload
+                            .keys_to_rebind
+                            .into_iter()
+                            .filter_map(|k| key_to_rebind_to_plugin_command_assets(k))
+                            .collect(),
+                        keys_to_unbind: rebind_keys_payload
+                            .keys_to_unbind
+                            .into_iter()
+                            .filter_map(|k| key_to_unbind_to_plugin_command_assets(k))
+                            .collect(),
+                        write_config_to_disk: rebind_keys_payload.write_config_to_disk,
+                    })
+                },
+                _ => Err("Mismatched payload for RebindKeys"),
+            },
             None => Err("Unrecognized plugin command"),
         }
     }
@@ -1921,6 +2046,81 @@ impl TryFrom<PluginCommand> for ProtobufPluginCommand {
                         tab_index: tab_index as u32,
                     },
                 )),
+            }),
+            PluginCommand::BreakPanesToNewTab(
+                pane_ids,
+                new_tab_name,
+                should_change_focus_to_new_tab,
+            ) => Ok(ProtobufPluginCommand {
+                name: CommandName::BreakPanesToNewTab as i32,
+                payload: Some(Payload::BreakPanesToNewTabPayload(
+                    BreakPanesToNewTabPayload {
+                        pane_ids: pane_ids
+                            .into_iter()
+                            .filter_map(|p_id| p_id.try_into().ok())
+                            .collect(),
+                        should_change_focus_to_new_tab,
+                        new_tab_name,
+                    },
+                )),
+            }),
+            PluginCommand::BreakPanesToTabWithIndex(
+                pane_ids,
+                tab_index,
+                should_change_focus_to_target_tab,
+            ) => Ok(ProtobufPluginCommand {
+                name: CommandName::BreakPanesToTabWithIndex as i32,
+                payload: Some(Payload::BreakPanesToTabWithIndexPayload(
+                    BreakPanesToTabWithIndexPayload {
+                        pane_ids: pane_ids
+                            .into_iter()
+                            .filter_map(|p_id| p_id.try_into().ok())
+                            .collect(),
+                        tab_index: tab_index as u32,
+                        should_change_focus_to_target_tab,
+                    },
+                )),
+            }),
+            PluginCommand::ReloadPlugin(plugin_id) => Ok(ProtobufPluginCommand {
+                name: CommandName::ReloadPlugin as i32,
+                payload: Some(Payload::ReloadPluginPayload(ReloadPluginPayload {
+                    plugin_id,
+                })),
+            }),
+            PluginCommand::LoadNewPlugin {
+                url,
+                config,
+                load_in_background,
+                skip_plugin_cache,
+            } => Ok(ProtobufPluginCommand {
+                name: CommandName::LoadNewPlugin as i32,
+                payload: Some(Payload::LoadNewPluginPayload(LoadNewPluginPayload {
+                    plugin_url: url,
+                    plugin_config: config
+                        .into_iter()
+                        .map(|(name, value)| ContextItem { name, value })
+                        .collect(),
+                    should_skip_plugin_cache: skip_plugin_cache,
+                    should_load_plugin_in_background: load_in_background,
+                })),
+            }),
+            PluginCommand::RebindKeys {
+                keys_to_rebind,
+                keys_to_unbind,
+                write_config_to_disk,
+            } => Ok(ProtobufPluginCommand {
+                name: CommandName::RebindKeys as i32,
+                payload: Some(Payload::RebindKeysPayload(RebindKeysPayload {
+                    keys_to_rebind: keys_to_rebind
+                        .into_iter()
+                        .filter_map(|k| k.try_into().ok())
+                        .collect(),
+                    keys_to_unbind: keys_to_unbind
+                        .into_iter()
+                        .filter_map(|k| k.try_into().ok())
+                        .collect(),
+                    write_config_to_disk,
+                })),
             }),
         }
     }

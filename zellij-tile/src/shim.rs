@@ -6,6 +6,7 @@ use std::{
 };
 use zellij_utils::data::*;
 use zellij_utils::errors::prelude::*;
+use zellij_utils::input::actions::Action;
 pub use zellij_utils::plugin_api;
 use zellij_utils::plugin_api::plugin_command::ProtobufPluginCommand;
 use zellij_utils::plugin_api::plugin_ids::{ProtobufPluginIds, ProtobufZellijVersion};
@@ -721,6 +722,18 @@ pub fn switch_session_with_layout(name: Option<&str>, layout: LayoutInfo, cwd: O
     unsafe { host_run_plugin_command() };
 }
 
+/// Switch to a session with the given name, create one if no name is given
+pub fn switch_session_with_cwd(name: Option<&str>, cwd: Option<PathBuf>) {
+    let plugin_command = PluginCommand::SwitchSession(ConnectToSession {
+        name: name.map(|n| n.to_string()),
+        cwd,
+        ..Default::default()
+    });
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
 /// Switch to a session with the given name, focusing either the provided pane_id or the provided
 /// tab position (in that order)
 pub fn switch_session_with_focus(
@@ -841,7 +854,7 @@ pub fn dump_session_layout() {
     unsafe { host_run_plugin_command() };
 }
 
-/// Rebind keys for the current user
+/// Change configuration for the current user
 pub fn reconfigure(new_config: String, save_configuration_file: bool) {
     let plugin_command = PluginCommand::Reconfigure(new_config, save_configuration_file);
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
@@ -1024,6 +1037,82 @@ where
         PaneId::Plugin(plugin_pane_id) => {
             PluginCommand::RenamePluginPane(plugin_pane_id, new_name.to_string())
         },
+    };
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+/// Create a new tab that includes the specified pane ids
+pub fn break_panes_to_new_tab(
+    pane_ids: &[PaneId],
+    new_tab_name: Option<String>,
+    should_change_focus_to_new_tab: bool,
+) {
+    let plugin_command = PluginCommand::BreakPanesToNewTab(
+        pane_ids.to_vec(),
+        new_tab_name,
+        should_change_focus_to_new_tab,
+    );
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+/// Create a new tab that includes the specified pane ids
+pub fn break_panes_to_tab_with_index(
+    pane_ids: &[PaneId],
+    tab_index: usize,
+    should_change_focus_to_new_tab: bool,
+) {
+    let plugin_command = PluginCommand::BreakPanesToTabWithIndex(
+        pane_ids.to_vec(),
+        tab_index,
+        should_change_focus_to_new_tab,
+    );
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+/// Reload an already-running in this session, optionally skipping the cache
+pub fn reload_plugin_with_id(plugin_id: u32) {
+    let plugin_command = PluginCommand::ReloadPlugin(plugin_id);
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+/// Reload an already-running in this session, optionally skipping the cache
+pub fn load_new_plugin<S: AsRef<str>>(
+    url: S,
+    config: BTreeMap<String, String>,
+    load_in_background: bool,
+    skip_plugin_cache: bool,
+) where
+    S: ToString,
+{
+    let plugin_command = PluginCommand::LoadNewPlugin {
+        url: url.to_string(),
+        config,
+        load_in_background,
+        skip_plugin_cache,
+    };
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+/// Rebind keys for the current user
+pub fn rebind_keys(
+    keys_to_unbind: Vec<(InputMode, KeyWithModifier)>,
+    keys_to_rebind: Vec<(InputMode, KeyWithModifier, Vec<Action>)>,
+    write_config_to_disk: bool,
+) {
+    let plugin_command = PluginCommand::RebindKeys {
+        keys_to_rebind,
+        keys_to_unbind,
+        write_config_to_disk,
     };
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
     object_to_stdout(&protobuf_plugin_command.encode_to_vec());

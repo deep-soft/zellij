@@ -136,6 +136,7 @@ pub const MIN_TERMINAL_WIDTH: usize = 5;
 const MAX_PENDING_VTE_EVENTS: usize = 7000;
 
 type HoldForCommand = Option<RunCommand>;
+pub type SuppressedPanes = HashMap<PaneId, (bool, Box<dyn Pane>)>; // bool => is scrollback editor
 
 enum BufferedTabInstruction {
     SetPaneSelectable(PaneId, bool),
@@ -150,7 +151,7 @@ pub(crate) struct Tab {
     pub prev_name: String,
     tiled_panes: TiledPanes,
     floating_panes: FloatingPanes,
-    suppressed_panes: HashMap<PaneId, (bool, Box<dyn Pane>)>, // bool => is scrollback editor
+    suppressed_panes: SuppressedPanes,
     max_panes: Option<usize>,
     viewport: Rc<RefCell<Viewport>>, // includes all non-UI panes
     display_area: Rc<RefCell<Size>>, // includes all panes (including eg. the status bar and tab bar in the default layout)
@@ -495,6 +496,10 @@ pub trait Pane {
     fn update_theme(&mut self, _theme: Palette) {}
     fn update_arrow_fonts(&mut self, _should_support_arrow_fonts: bool) {}
     fn update_rounded_corners(&mut self, _rounded_corners: bool) {}
+    fn set_should_be_suppressed(&mut self, _should_be_suppressed: bool) {}
+    fn query_should_be_suppressed(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -546,7 +551,7 @@ impl Tab {
         auto_layout: bool,
         connected_clients_in_app: Rc<RefCell<HashSet<ClientId>>>,
         session_is_mirrored: bool,
-        client_id: ClientId,
+        client_id: Option<ClientId>,
         copy_options: CopyOptions,
         terminal_emulator_colors: Rc<RefCell<Palette>>,
         terminal_emulator_color_codes: Rc<RefCell<HashMap<usize, String>>>,
@@ -564,7 +569,9 @@ impl Tab {
         };
 
         let mut connected_clients = HashSet::new();
-        connected_clients.insert(client_id);
+        if let Some(client_id) = client_id {
+            connected_clients.insert(client_id);
+        }
         let viewport: Viewport = display_area.into();
         let viewport = Rc::new(RefCell::new(viewport));
         let display_area = Rc::new(RefCell::new(display_area));
@@ -1853,7 +1860,7 @@ impl Tab {
         let mut should_update_ui = false;
         let is_sync_panes_active = self.is_sync_panes_active();
 
-        let active_terminal = self
+        let active_pane = self
             .floating_panes
             .get_mut(&pane_id)
             .or_else(|| self.tiled_panes.get_pane_mut(pane_id))
@@ -1865,8 +1872,7 @@ impl Tab {
         // However if the terminal is part of a tab-sync, we need to
         // check if the terminal should receive input or not (depending on its
         // 'exclude_from_sync' configuration).
-        let should_not_write_to_terminal =
-            is_sync_panes_active && active_terminal.exclude_from_sync();
+        let should_not_write_to_terminal = is_sync_panes_active && active_pane.exclude_from_sync();
 
         if should_not_write_to_terminal {
             return Ok(should_update_ui);
@@ -1874,7 +1880,7 @@ impl Tab {
 
         match pane_id {
             PaneId::Terminal(active_terminal_id) => {
-                match active_terminal.adjust_input_to_terminal(
+                match active_pane.adjust_input_to_terminal(
                     key_with_modifier,
                     raw_input_bytes,
                     raw_input_bytes_are_kitty,
@@ -1916,7 +1922,7 @@ impl Tab {
                     None => {},
                 }
             },
-            PaneId::Plugin(pid) => match active_terminal.adjust_input_to_terminal(
+            PaneId::Plugin(pid) => match active_pane.adjust_input_to_terminal(
                 key_with_modifier,
                 raw_input_bytes,
                 raw_input_bytes_are_kitty,
@@ -1940,6 +1946,10 @@ impl Tab {
                         .with_context(err_context)?;
                 },
                 Some(AdjustedInput::PermissionRequestResult(permissions, status)) => {
+                    if active_pane.query_should_be_suppressed() {
+                        active_pane.set_should_be_suppressed(false);
+                        self.suppress_pane(PaneId::Plugin(pid), client_id);
+                    }
                     self.request_plugin_permissions(pid, None);
                     self.senders
                         .send_to_plugin(PluginInstruction::PermissionRequestResult(
@@ -2302,19 +2312,20 @@ impl Tab {
     }
     pub fn resize(&mut self, client_id: ClientId, strategy: ResizeStrategy) -> Result<()> {
         let err_context = || format!("unable to resize pane");
-        self.swap_layouts.set_is_floating_damaged();
-        self.swap_layouts.set_is_tiled_damaged();
         if self.floating_panes.panes_are_visible() {
             let successfully_resized = self
                 .floating_panes
                 .resize_active_pane(client_id, &mut self.os_api, &strategy)
                 .with_context(err_context)?;
             if successfully_resized {
+                self.swap_layouts.set_is_floating_damaged();
                 self.set_force_render(); // we force render here to make sure the panes under the floating pane render and don't leave "garbage" in case of a decrease
             }
         } else {
             match self.tiled_panes.resize_active_pane(client_id, &strategy) {
-                Ok(_) => {},
+                Ok(_) => {
+                    self.swap_layouts.set_is_tiled_damaged();
+                },
                 Err(err) => match err.downcast_ref::<ZellijError>() {
                     Some(ZellijError::CantResizeFixedPanes { pane_ids }) => {
                         let mut pane_ids_to_error = vec![];
@@ -2332,7 +2343,7 @@ impl Tab {
                             ))
                             .with_context(err_context)?;
                     },
-                    _ => Err::<(), _>(err).fatal(),
+                    _ => Err::<(), _>(err).non_fatal(),
                 },
             }
         }
@@ -3825,24 +3836,19 @@ impl Tab {
         let err_context =
             || format!("failed to update name of active pane to '{buf:?}' for client {client_id}");
 
-        if let Some(active_terminal_id) = self.get_active_terminal_id(client_id) {
-            let active_terminal = if self.are_floating_panes_visible() {
-                self.floating_panes
-                    .get_pane_mut(PaneId::Terminal(active_terminal_id))
-            } else {
-                self.tiled_panes
-                    .get_pane_mut(PaneId::Terminal(active_terminal_id))
-            }
-            .with_context(err_context)?;
-
-            // It only allows printable unicode, delete and backspace keys.
-            let is_updatable = buf
-                .iter()
-                .all(|u| matches!(u, 0x20..=0x7E | 0xA0..=0xFF | 0x08 | 0x7F));
-            if is_updatable {
-                let s = str::from_utf8(&buf).with_context(err_context)?;
-                active_terminal.update_name(s);
-            }
+        // Only allow printable unicode, delete and backspace keys.
+        let is_updatable = buf
+            .iter()
+            .all(|u| matches!(u, 0x20..=0x7E | 0xA0..=0xFF | 0x08 | 0x7F));
+        if is_updatable {
+            let s = str::from_utf8(&buf).with_context(err_context)?;
+            self.get_active_pane_mut(client_id)
+                .with_context(|| format!("no active pane found for client {client_id}"))
+                .map(|active_pane| {
+                    active_pane.update_name(s);
+                })?;
+        } else {
+            log::error!("Failed to update pane name due to unprintable characters");
         }
         Ok(())
     }
@@ -4099,7 +4105,8 @@ impl Tab {
                 focused_floating_pane
             })
             .or_else(|_| match self.suppressed_panes.remove(&pane_id) {
-                Some(pane) => {
+                Some(mut pane) => {
+                    pane.1.set_selectable(true);
                     if should_float {
                         self.show_floating_panes();
                         self.add_floating_pane(pane.1, pane_id, None, Some(client_id))
@@ -4111,12 +4118,24 @@ impl Tab {
                 None => Ok(()),
             })
     }
-    pub fn suppress_pane(&mut self, pane_id: PaneId, client_id: ClientId) {
+    pub fn focus_suppressed_pane_for_all_clients(&mut self, pane_id: PaneId) {
+        match self.suppressed_panes.remove(&pane_id) {
+            Some(pane) => {
+                self.show_floating_panes();
+                self.add_floating_pane(pane.1, pane_id, None, None);
+                self.floating_panes.focus_pane_for_all_clients(pane_id);
+            },
+            None => {
+                log::error!("Could not find suppressed pane wiht id: {:?}", pane_id);
+            },
+        }
+    }
+    pub fn suppress_pane(&mut self, pane_id: PaneId, client_id: Option<ClientId>) {
         // this method places a pane in the suppressed pane with its own ID - this means we'll
         // not take it out of there when another pane is closed (eg. like happens with the
         // scrollback editor), but it has to take itself out on its own (eg. a plugin using the
         // show_self() method)
-        if let Some(pane) = self.extract_pane(pane_id, true, Some(client_id)) {
+        if let Some(pane) = self.extract_pane(pane_id, true, client_id) {
             let is_scrollback_editor = false;
             self.suppressed_panes
                 .insert(pane_id, (is_scrollback_editor, pane));
@@ -4203,18 +4222,35 @@ impl Tab {
         Ok(())
     }
     pub fn request_plugin_permissions(&mut self, pid: u32, permissions: Option<PluginPermission>) {
+        let mut should_focus_pane = false;
         if let Some(plugin_pane) = self
             .tiled_panes
             .get_pane_mut(PaneId::Plugin(pid))
             .or_else(|| self.floating_panes.get_pane_mut(PaneId::Plugin(pid)))
             .or_else(|| {
-                self.suppressed_panes
+                let mut suppressed_pane = self
+                    .suppressed_panes
                     .values_mut()
                     .find(|s_p| s_p.1.pid() == PaneId::Plugin(pid))
-                    .map(|s_p| &mut s_p.1)
+                    .map(|s_p| &mut s_p.1);
+                if let Some(suppressed_pane) = suppressed_pane.as_mut() {
+                    if permissions.is_some() {
+                        // here what happens is that we're requesting permissions for a pane that
+                        // is suppressed, meaning the user cannot see the permission request
+                        // so we temporarily focus this pane as a floating pane, marking it so that
+                        // once the permissions are accepted/rejected by the user, it will be
+                        // suppressed again
+                        suppressed_pane.set_should_be_suppressed(true);
+                        should_focus_pane = true;
+                    }
+                }
+                suppressed_pane
             })
         {
             plugin_pane.request_permissions_from_user(permissions);
+        }
+        if should_focus_pane {
+            self.focus_suppressed_pane_for_all_clients(PaneId::Plugin(pid));
         }
     }
     pub fn rerun_terminal_pane_with_id(&mut self, terminal_pane_id: u32) {
@@ -4276,7 +4312,7 @@ impl Tab {
                             ))
                             .with_context(err_context)?;
                     },
-                    _ => Err::<(), _>(err).fatal(),
+                    _ => Err::<(), _>(err).non_fatal(),
                 },
             }
         } else if self
@@ -4328,6 +4364,14 @@ impl Tab {
     }
     pub fn update_auto_layout(&mut self, auto_layout: bool) {
         self.auto_layout = auto_layout;
+    }
+    pub fn extract_suppressed_panes(&mut self) -> SuppressedPanes {
+        self.suppressed_panes.drain().collect()
+    }
+    pub fn add_suppressed_panes(&mut self, mut suppressed_panes: SuppressedPanes) {
+        for (pane_id, suppressed_pane_entry) in suppressed_panes.drain() {
+            self.suppressed_panes.insert(pane_id, suppressed_pane_entry);
+        }
     }
     fn new_scrollback_editor_pane(&self, pid: u32) -> TerminalPane {
         let next_terminal_position = self.get_next_terminal_position();

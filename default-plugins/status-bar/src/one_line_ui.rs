@@ -696,7 +696,7 @@ fn secondary_keybinds(help: &ModeInfo, tab_info: Option<&TabInfo>, max_len: usiz
     let move_focus_left_action_key = action_key(binds, &[Action::MoveFocusOrTab(Direction::Left)]);
     let move_focus_left_key = move_focus_left_action_key
         .iter()
-        .find(|k| k.is_key_with_alt_modifier(BareKey::Left))
+        .find(|k| k.bare_key == BareKey::Left)
         .or_else(|| move_focus_left_action_key.iter().next());
     if let Some(move_focus_left_key) = move_focus_left_key {
         move_focus_shortcuts.push(move_focus_left_key.clone());
@@ -705,7 +705,7 @@ fn secondary_keybinds(help: &ModeInfo, tab_info: Option<&TabInfo>, max_len: usiz
     let move_focus_left_action_key = action_key(binds, &[Action::MoveFocus(Direction::Down)]);
     let move_focus_left_key = move_focus_left_action_key
         .iter()
-        .find(|k| k.is_key_with_alt_modifier(BareKey::Down))
+        .find(|k| k.bare_key == BareKey::Down)
         .or_else(|| move_focus_left_action_key.iter().next());
     if let Some(move_focus_left_key) = move_focus_left_key {
         move_focus_shortcuts.push(move_focus_left_key.clone());
@@ -714,7 +714,7 @@ fn secondary_keybinds(help: &ModeInfo, tab_info: Option<&TabInfo>, max_len: usiz
     let move_focus_left_action_key = action_key(binds, &[Action::MoveFocus(Direction::Up)]);
     let move_focus_left_key = move_focus_left_action_key
         .iter()
-        .find(|k| k.is_key_with_alt_modifier(BareKey::Up))
+        .find(|k| k.bare_key == BareKey::Up)
         .or_else(|| move_focus_left_action_key.iter().next());
     if let Some(move_focus_left_key) = move_focus_left_key {
         move_focus_shortcuts.push(move_focus_left_key.clone());
@@ -723,7 +723,7 @@ fn secondary_keybinds(help: &ModeInfo, tab_info: Option<&TabInfo>, max_len: usiz
     let move_focus_left_action_key = action_key(binds, &[Action::MoveFocusOrTab(Direction::Right)]);
     let move_focus_left_key = move_focus_left_action_key
         .iter()
-        .find(|k| k.is_key_with_alt_modifier(BareKey::Right))
+        .find(|k| k.bare_key == BareKey::Right)
         .or_else(|| move_focus_left_action_key.iter().next());
     if let Some(move_focus_left_key) = move_focus_left_key {
         move_focus_shortcuts.push(move_focus_left_key.clone());
@@ -1193,7 +1193,7 @@ fn get_keys_and_hints(mi: &ModeInfo) -> Vec<(String, String, Vec<KeyWithModifier
         };
 
         vec![
-        (s("New"), s("New"), single_action_key(&km, &[A::NewTab(None, vec![], None, None, None), TO_NORMAL])),
+        (s("New"), s("New"), single_action_key(&km, &[A::NewTab(None, vec![], None, None, None, true), TO_NORMAL])),
         (s("Change focus"), s("Move"), focus_keys),
         (s("Close"), s("Close"), single_action_key(&km, &[A::CloseTab, TO_NORMAL])),
         (s("Rename"), s("Rename"),
@@ -1266,6 +1266,7 @@ fn get_keys_and_hints(mi: &ModeInfo) -> Vec<(String, String, Vec<KeyWithModifier
         (s("Detach"), s("Detach"), action_key(&km, &[Action::Detach])),
         (s("Session Manager"), s("Manager"), session_manager_key(&km)),
         (s("Configure"), s("Config"), configuration_key(&km)),
+        (s("Plugin Manager"), s("Plugins"), plugin_manager_key(&km)),
         (s("Select pane"), s("Select"), to_basemode_key),
     ]} else if mi.mode == IM::Tmux { vec![
         (s("Move focus"), s("Move"), action_key_group(&km, &[
@@ -1274,7 +1275,7 @@ fn get_keys_and_hints(mi: &ModeInfo) -> Vec<(String, String, Vec<KeyWithModifier
         (s("Split down"), s("Down"), action_key(&km, &[A::NewPane(Some(Dir::Down), None, false), TO_NORMAL])),
         (s("Split right"), s("Right"), action_key(&km, &[A::NewPane(Some(Dir::Right), None, false), TO_NORMAL])),
         (s("Fullscreen"), s("Fullscreen"), action_key(&km, &[A::ToggleFocusFullscreen, TO_NORMAL])),
-        (s("New tab"), s("New"), action_key(&km, &[A::NewTab(None, vec![], None, None, None), TO_NORMAL])),
+        (s("New tab"), s("New"), action_key(&km, &[A::NewTab(None, vec![], None, None, None, true), TO_NORMAL])),
         (s("Rename tab"), s("Rename"),
             action_key(&km, &[A::SwitchToMode(IM::RenameTab), A::TabNameInput(vec![0])])),
         (s("Previous Tab"), s("Previous"), action_key(&km, &[A::GoToPreviousTab, TO_NORMAL])),
@@ -1342,6 +1343,25 @@ fn session_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWith
         let has_match = acvec
             .iter()
             .find(|a| a.launches_plugin("session-manager"))
+            .is_some();
+        if has_match {
+            Some(key.clone())
+        } else {
+            None
+        }
+    });
+    if let Some(matching) = matching.take() {
+        vec![matching]
+    } else {
+        vec![]
+    }
+}
+
+fn plugin_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
+    let mut matching = keymap.iter().find_map(|(key, acvec)| {
+        let has_match = acvec
+            .iter()
+            .find(|a| a.launches_plugin("plugin-manager"))
             .is_some();
         if has_match {
             Some(key.clone())

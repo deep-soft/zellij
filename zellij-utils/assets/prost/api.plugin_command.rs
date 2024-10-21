@@ -5,7 +5,7 @@ pub struct PluginCommand {
     pub name: i32,
     #[prost(
         oneof = "plugin_command::Payload",
-        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83"
+        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88"
     )]
     pub payload: ::core::option::Option<plugin_command::Payload>,
 }
@@ -164,7 +164,83 @@ pub mod plugin_command {
         ),
         #[prost(message, tag = "83")]
         CloseTabWithIndexPayload(super::CloseTabWithIndexPayload),
+        #[prost(message, tag = "84")]
+        BreakPanesToNewTabPayload(super::BreakPanesToNewTabPayload),
+        #[prost(message, tag = "85")]
+        BreakPanesToTabWithIndexPayload(super::BreakPanesToTabWithIndexPayload),
+        #[prost(message, tag = "86")]
+        ReloadPluginPayload(super::ReloadPluginPayload),
+        #[prost(message, tag = "87")]
+        LoadNewPluginPayload(super::LoadNewPluginPayload),
+        #[prost(message, tag = "88")]
+        RebindKeysPayload(super::RebindKeysPayload),
     }
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RebindKeysPayload {
+    #[prost(message, repeated, tag = "1")]
+    pub keys_to_rebind: ::prost::alloc::vec::Vec<KeyToRebind>,
+    #[prost(message, repeated, tag = "2")]
+    pub keys_to_unbind: ::prost::alloc::vec::Vec<KeyToUnbind>,
+    #[prost(bool, tag = "3")]
+    pub write_config_to_disk: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KeyToRebind {
+    #[prost(enumeration = "super::input_mode::InputMode", tag = "1")]
+    pub input_mode: i32,
+    #[prost(message, optional, tag = "2")]
+    pub key: ::core::option::Option<super::key::Key>,
+    #[prost(message, repeated, tag = "3")]
+    pub actions: ::prost::alloc::vec::Vec<super::action::Action>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KeyToUnbind {
+    #[prost(enumeration = "super::input_mode::InputMode", tag = "1")]
+    pub input_mode: i32,
+    #[prost(message, optional, tag = "2")]
+    pub key: ::core::option::Option<super::key::Key>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LoadNewPluginPayload {
+    #[prost(string, tag = "1")]
+    pub plugin_url: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "2")]
+    pub plugin_config: ::prost::alloc::vec::Vec<ContextItem>,
+    #[prost(bool, tag = "3")]
+    pub should_load_plugin_in_background: bool,
+    #[prost(bool, tag = "4")]
+    pub should_skip_plugin_cache: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReloadPluginPayload {
+    #[prost(uint32, tag = "1")]
+    pub plugin_id: u32,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BreakPanesToTabWithIndexPayload {
+    #[prost(message, repeated, tag = "1")]
+    pub pane_ids: ::prost::alloc::vec::Vec<PaneId>,
+    #[prost(uint32, tag = "2")]
+    pub tab_index: u32,
+    #[prost(bool, tag = "3")]
+    pub should_change_focus_to_target_tab: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BreakPanesToNewTabPayload {
+    #[prost(message, repeated, tag = "1")]
+    pub pane_ids: ::prost::alloc::vec::Vec<PaneId>,
+    #[prost(bool, tag = "2")]
+    pub should_change_focus_to_new_tab: bool,
+    #[prost(string, optional, tag = "3")]
+    pub new_tab_name: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -634,6 +710,11 @@ pub enum CommandName {
     TogglePaneIdFullscreen = 105,
     TogglePaneEmbedOrEjectForPaneId = 106,
     CloseTabWithIndex = 107,
+    BreakPanesToNewTab = 108,
+    BreakPanesToTabWithIndex = 109,
+    ReloadPlugin = 110,
+    LoadNewPlugin = 111,
+    RebindKeys = 112,
 }
 impl CommandName {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -752,6 +833,11 @@ impl CommandName {
                 "TogglePaneEmbedOrEjectForPaneId"
             }
             CommandName::CloseTabWithIndex => "CloseTabWithIndex",
+            CommandName::BreakPanesToNewTab => "BreakPanesToNewTab",
+            CommandName::BreakPanesToTabWithIndex => "BreakPanesToTabWithIndex",
+            CommandName::ReloadPlugin => "ReloadPlugin",
+            CommandName::LoadNewPlugin => "LoadNewPlugin",
+            CommandName::RebindKeys => "RebindKeys",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -867,6 +953,11 @@ impl CommandName {
                 Some(Self::TogglePaneEmbedOrEjectForPaneId)
             }
             "CloseTabWithIndex" => Some(Self::CloseTabWithIndex),
+            "BreakPanesToNewTab" => Some(Self::BreakPanesToNewTab),
+            "BreakPanesToTabWithIndex" => Some(Self::BreakPanesToTabWithIndex),
+            "ReloadPlugin" => Some(Self::ReloadPlugin),
+            "LoadNewPlugin" => Some(Self::LoadNewPlugin),
+            "RebindKeys" => Some(Self::RebindKeys),
             _ => None,
         }
     }
