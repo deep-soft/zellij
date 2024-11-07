@@ -47,10 +47,12 @@ impl Default for RebindLeadersScreen {
 }
 
 impl RebindLeadersScreen {
-    pub fn with_rebinding_for_presets(mut self) -> Self {
-        self.is_rebinding_for_presets = true;
-        self
-    }
+    // temporarily commented out for the time being because the extra leaders screen was deemed a bit
+    // confusing, see commend in <l> key
+    //     pub fn with_rebinding_for_presets(mut self) -> Self {
+    //         self.is_rebinding_for_presets = true;
+    //         self
+    //     }
     pub fn with_mode_info(mut self, latest_mode_info: Option<ModeInfo>) -> Self {
         self.latest_mode_info = latest_mode_info;
         self.hard_reset_ui_state();
@@ -294,7 +296,7 @@ impl RebindLeadersScreen {
             WIDTH_BREAKPOINTS.1
         };
         let base_x = cols.saturating_sub(screen_width) / 2;
-        let base_y = rows.saturating_sub(7) / 2;
+        let base_y = rows.saturating_sub(10) / 2;
         let primary_modifier_key_text = self.primary_modifier_text();
         let (primary_modifier_text, primary_modifier_start_position) =
             if cols >= WIDTH_BREAKPOINTS.0 {
@@ -305,7 +307,7 @@ impl RebindLeadersScreen {
         print_text_with_coordinates(
             Text::new(primary_modifier_text).color_range(3, primary_modifier_start_position..),
             base_x,
-            base_y + 4,
+            base_y + 5,
             None,
             None,
         );
@@ -327,7 +329,7 @@ impl RebindLeadersScreen {
                 })
                 .collect(),
             base_x,
-            base_y + 5,
+            base_y + 6,
             Some(screen_width / 2),
             None,
         );
@@ -558,10 +560,11 @@ impl RebindLeadersScreen {
         if self.is_rebinding_for_presets {
             return self.render_help_text_for_presets_rebinding(rows, cols);
         }
-        let help_text_long = "Help: <←↓↑→> - navigate, <SPACE> - select, <ENTER> - apply, <INSERT> - save, <Ctrl c> - reset, <ESC> - close";
-        let help_text_medium = "Help: <←↓↑→/SPACE> - navigate/select, <ENTER/INS> - apply/save, <Ctrl c> - reset, <ESC> - close";
-        let help_text_short = "Help: <←↓↑→>/<SPACE>/<ENTER> select/<INS> save/<Ctrl c> reset/<ESC>";
-        let help_text_minimum = "<←↓↑→>/<SPACE>/<ENTER>/<INS>/<Ctrl c>/<ESC>";
+        let help_text_long = "Help: <←↓↑→> - navigate, <SPACE> - select, <ENTER> - apply, <Ctrl a> - save, <Ctrl c> - reset, <ESC> - close";
+        let help_text_medium = "Help: <←↓↑→/SPACE> - navigate/select, <ENTER/Ctrl a> - apply/save, <Ctrl c> - reset, <ESC> - close";
+        let help_text_short =
+            "Help: <←↓↑→>/<SPACE>/<ENTER> select/<Ctrl a> save/<Ctrl c> reset/<ESC>";
+        let help_text_minimum = "<←↓↑→>/<SPACE>/<ENTER>/<Ctrl a>/<Ctrl c>/<ESC>";
         if cols >= help_text_long.chars().count() {
             print_text_with_coordinates(
                 Text::new(help_text_long)
@@ -580,9 +583,9 @@ impl RebindLeadersScreen {
             print_text_with_coordinates(
                 Text::new(help_text_medium)
                     .color_range(2, 6..=17)
-                    .color_range(2, 38..=48)
-                    .color_range(2, 64..=72)
-                    .color_range(2, 82..=86),
+                    .color_range(2, 38..=51)
+                    .color_range(2, 67..=75)
+                    .color_range(2, 85..=89),
                 0,
                 rows,
                 None,
@@ -594,9 +597,9 @@ impl RebindLeadersScreen {
                     .color_range(2, 6..=11)
                     .color_range(2, 13..=19)
                     .color_range(2, 21..=27)
-                    .color_range(2, 36..=40)
-                    .color_range(2, 47..=54)
-                    .color_range(2, 62..=66),
+                    .color_range(2, 36..=43)
+                    .color_range(2, 50..=57)
+                    .color_range(2, 65..=69),
                 0,
                 rows,
                 None,
@@ -608,9 +611,9 @@ impl RebindLeadersScreen {
                     .color_range(2, ..=5)
                     .color_range(2, 7..=13)
                     .color_range(2, 15..=21)
-                    .color_range(2, 23..=27)
-                    .color_range(2, 29..=36)
-                    .color_range(2, 38..=42),
+                    .color_range(2, 23..=30)
+                    .color_range(2, 32..=39)
+                    .color_range(2, 41..=45),
                 0,
                 rows,
                 None,
@@ -679,6 +682,12 @@ impl RebindLeadersScreen {
             self.handle_default_preset_key(key)
         }
     }
+    pub fn drain_notification(&mut self) -> Option<String> {
+        self.notification.take()
+    }
+    pub fn set_notification(&mut self, notification: Option<String>) {
+        self.notification = notification;
+    }
     fn currently_in_unlock_first(&self) -> bool {
         if self.is_rebinding_for_presets {
             false
@@ -691,8 +700,8 @@ impl RebindLeadersScreen {
     }
     fn handle_default_preset_key(&mut self, key: KeyWithModifier) -> bool {
         let should_render = true;
-        if key.bare_key == BareKey::Insert
-            && key.has_no_modifiers()
+        if key.bare_key == BareKey::Char('a')
+            && key.has_modifiers(&[KeyModifier::Ctrl])
             && !self.is_rebinding_for_presets
         {
             let write_to_disk = true;
@@ -1194,8 +1203,8 @@ impl RebindLeadersScreen {
         self.is_rebinding_for_presets = is_rebinding_for_presets;
     }
     fn handle_unlock_first_key(&mut self, key: KeyWithModifier) -> bool {
-        if key.bare_key == BareKey::Insert
-            && key.has_no_modifiers()
+        if key.bare_key == BareKey::Char('a')
+            && key.has_modifiers(&[KeyModifier::Ctrl])
             && !self.is_rebinding_for_presets
         {
             let write_to_disk = true;

@@ -9,6 +9,7 @@ use zellij_tile::prelude::*;
 use zellij_tile_utils::palette_match;
 
 use crate::first_line::{to_char, KeyAction, KeyMode, KeyShortcut};
+use crate::second_line::{system_clipboard_error, text_copied_hint};
 use crate::{action_key, action_key_group, color_elements, MORE_MSG, TO_NORMAL};
 use crate::{ColoredElements, LinePart};
 use unicode_width::UnicodeWidthStr;
@@ -19,7 +20,15 @@ pub fn one_line_ui(
     mut max_len: usize,
     separator: &str,
     base_mode_is_locked: bool,
+    text_copied_to_clipboard_destination: Option<CopyDestination>,
+    clipboard_failure: bool,
 ) -> LinePart {
+    if let Some(text_copied_to_clipboard_destination) = text_copied_to_clipboard_destination {
+        return text_copied_hint(&help.style.colors, text_copied_to_clipboard_destination);
+    }
+    if clipboard_failure {
+        return system_clipboard_error(&help.style.colors);
+    }
     let mut line_part_to_render = LinePart::default();
     let mut append = |line_part: &LinePart, max_len: &mut usize| {
         line_part_to_render.append(line_part);
@@ -641,7 +650,7 @@ fn render_common_modifiers(
     line_part_to_render.part = format!(
         "{}{}{}",
         line_part_to_render.part,
-        serialize_text(&Text::new(&prefix_text)),
+        serialize_text(&Text::new(&prefix_text).opaque()),
         suffix_separator
     );
     line_part_to_render.len += prefix_text.chars().count() + separator.chars().count();
@@ -899,7 +908,7 @@ fn secondary_keybinds(help: &ModeInfo, tab_info: Option<&TabInfo>, max_len: usiz
 }
 
 fn text_as_line_part_with_emphasis(text: String, emphases_index: usize) -> LinePart {
-    let part = serialize_text(&Text::new(&text).color_range(emphases_index, ..));
+    let part = serialize_text(&Text::new(&text).color_range(emphases_index, ..).opaque());
     LinePart {
         part,
         len: text.width(),
@@ -1436,9 +1445,11 @@ fn style_key_with_modifier(keyvec: &[KeyWithModifier], color_index: Option<usize
     if no_common_modifier || key.len() == 1 {
         let key_string_text = format!(" {} ", key.join(key_separator));
         let text = if let Some(color_index) = color_index {
-            Text::new(&key_string_text).color_range(color_index, ..)
-        } else {
             Text::new(&key_string_text)
+                .color_range(color_index, ..)
+                .opaque()
+        } else {
+            Text::new(&key_string_text).opaque()
         };
         LinePart {
             part: serialize_text(&text),
@@ -1455,8 +1466,9 @@ fn style_key_with_modifier(keyvec: &[KeyWithModifier], color_index: Option<usize
                     modifier_str.width() + 3
                         ..modifier_str.width() + 3 + key_string_without_modifier.width(),
                 )
+                .opaque()
         } else {
-            Text::new(&key_string_text)
+            Text::new(&key_string_text).opaque()
         };
         LinePart {
             part: serialize_text(&text),

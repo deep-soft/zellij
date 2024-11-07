@@ -369,8 +369,6 @@ impl WasmBridge {
             let default_shell = self.default_shell.clone();
             let default_layout = self.default_layout.clone();
             let layout_dir = self.layout_dir.clone();
-            let base_modes = self.base_modes.clone();
-            let keybinds = self.keybinds.clone();
             async move {
                 match PluginLoader::reload_plugin(
                     plugin_id,
@@ -388,8 +386,6 @@ impl WasmBridge {
                     default_shell.clone(),
                     default_layout.clone(),
                     layout_dir.clone(),
-                    &base_modes,
-                    &keybinds,
                 ) {
                     Ok(_) => {
                         let plugin_list = plugin_map.lock().unwrap().list_plugins();
@@ -449,8 +445,6 @@ impl WasmBridge {
             let default_shell = self.default_shell.clone();
             let default_layout = self.default_layout.clone();
             let layout_dir = self.layout_dir.clone();
-            let base_modes = self.base_modes.clone();
-            let keybinds = self.keybinds.clone();
             async move {
                 match PluginLoader::reload_plugin(
                     first_plugin_id,
@@ -468,8 +462,6 @@ impl WasmBridge {
                     default_shell.clone(),
                     default_layout.clone(),
                     layout_dir.clone(),
-                    &base_modes,
-                    &keybinds,
                 ) {
                     Ok(_) => {
                         let plugin_list = plugin_map.lock().unwrap().list_plugins();
@@ -496,8 +488,6 @@ impl WasmBridge {
                                 default_shell.clone(),
                                 default_layout.clone(),
                                 layout_dir.clone(),
-                                &base_modes,
-                                &keybinds,
                             ) {
                                 Ok(_) => {
                                     let plugin_list = plugin_map.lock().unwrap().list_plugins();
@@ -615,7 +605,9 @@ impl WasmBridge {
                             running_plugin.rows = new_rows;
                             running_plugin.columns = new_columns;
 
-                            if old_rows != new_rows || old_columns != new_columns {
+                            // in the below conditional, we check if event_id == 0 so that we'll
+                            // make sure to always render on the first resize event
+                            if old_rows != new_rows || old_columns != new_columns || event_id == 0 {
                                 let rendered_bytes = running_plugin
                                     .instance
                                     .clone()

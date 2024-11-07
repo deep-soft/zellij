@@ -1569,9 +1569,15 @@ impl TiledPanes {
             closed_pane
         } else {
             let closed_pane = self.panes.remove(&pane_id);
-            // this is a bit of a roundabout way to say: this is the last pane and so the tab
-            // should be destroyed
-            self.active_panes.clear(&mut self.panes);
+            if closed_pane
+                .as_ref()
+                .map(|p| p.selectable())
+                .unwrap_or(false)
+            {
+                // this is a bit of a roundabout way to say: this is the last pane and so the tab
+                // should be destroyed
+                self.active_panes.clear(&mut self.panes);
+            }
             closed_pane
         }
     }
@@ -1685,16 +1691,18 @@ impl TiledPanes {
         }
     }
 
-    pub fn focus_pane_left_fullscreen(&mut self, client_id: ClientId) {
+    pub fn focus_pane_left_fullscreen(&mut self, client_id: ClientId) -> bool {
         self.unset_fullscreen();
-        self.move_focus_left(client_id);
+        let ret = self.move_focus_left(client_id);
         self.toggle_active_pane_fullscreen(client_id);
+        return ret;
     }
 
-    pub fn focus_pane_right_fullscreen(&mut self, client_id: ClientId) {
+    pub fn focus_pane_right_fullscreen(&mut self, client_id: ClientId) -> bool {
         self.unset_fullscreen();
-        self.move_focus_right(client_id);
+        let ret = self.move_focus_right(client_id);
         self.toggle_active_pane_fullscreen(client_id);
+        return ret;
     }
 
     pub fn focus_pane_up_fullscreen(&mut self, client_id: ClientId) {

@@ -34,6 +34,7 @@ pub struct NewPluginScreen {
     selected_config_index: Option<usize>,
     request_ids: Vec<String>,
     load_in_background: bool,
+    colors: Palette,
 }
 
 impl Default for NewPluginScreen {
@@ -49,11 +50,19 @@ impl Default for NewPluginScreen {
             selected_config_index: None,
             request_ids: vec![],
             load_in_background: true,
+            colors: Palette::default(),
         }
     }
 }
 
 impl NewPluginScreen {
+    pub fn new(colors: Palette) -> Self {
+        Self {
+            colors,
+            ..Default::default()
+        }
+    }
+
     pub fn render(&self, rows: usize, cols: usize) {
         self.render_title(cols);
         self.render_url_field(cols);
@@ -246,11 +255,25 @@ impl NewPluginScreen {
     fn render_background_toggle(&self, y_coordinates: usize) {
         let key_shortcuts_text = format!("Ctrl l");
         print_text_with_coordinates(
-            Text::new(&key_shortcuts_text).color_range(3, ..),
+            Text::new(&key_shortcuts_text).color_range(3, ..).opaque(),
             0,
             y_coordinates,
             None,
             None,
+        );
+        let background = match self.colors.theme_hue {
+            ThemeHue::Dark => self.colors.black,
+            ThemeHue::Light => self.colors.white,
+        };
+        let bg_color = match background {
+            PaletteColor::Rgb((r, g, b)) => format!("\u{1b}[48;2;{};{};{}m\u{1b}[0K", r, g, b),
+            PaletteColor::EightBit(color) => format!("\u{1b}[48;5;{}m\u{1b}[0K", color),
+        };
+        println!(
+            "\u{1b}[{};{}H{}",
+            y_coordinates + 1,
+            key_shortcuts_text.chars().count() + 1,
+            bg_color
         );
         let load_in_background_text = format!("Load in Background");
         let load_in_foreground_text = format!("Load in Foreground");
@@ -473,6 +496,7 @@ struct State {
     plugin_id_to_tab_position: HashMap<u32, usize>,
     search_term: String,
     new_plugin_screen: Option<NewPluginScreen>,
+    colors: Palette,
 }
 
 register_plugin!(State);
@@ -524,6 +548,10 @@ impl ZellijPlugin for State {
     fn update(&mut self, event: Event) -> bool {
         let mut should_render = false;
         match event {
+            Event::ModeUpdate(mode_info) => {
+                self.colors = mode_info.style.colors;
+                should_render = true;
+            },
             Event::SessionUpdate(live_sessions, _dead_sessions) => {
                 for session in live_sessions {
                     if session.is_current_session {
@@ -841,29 +869,33 @@ impl State {
         tab_line
     }
     pub fn render_help(&self, y: usize, cols: usize) {
-        let full_text = "Help: <←↓↑→> - Navigate/Expand, <ENTER> - focus, <TAB> - Reload, <Del> - Close, <INSERT> - New";
+        let full_text = "Help: <←↓↑→> - Navigate/Expand, <ENTER> - focus, <TAB> - Reload, <Del> - Close, <Ctrl a> - New, <ESC> - Exit";
         let middle_text =
-            "Help: <←↓↑→/ENTER> - Navigate, <TAB> - Reload, <Del> - Close, <INSERT> - New";
-        let short_text = "<←↓↑→/ENTER/TAB/Del> - Navigate/Expand/Reload/Close, <INSERT> - New";
+            "Help: <←↓↑→/ENTER> - Navigate, <TAB> - Reload, <Del> - Close, <Ctrl a> - New, <ESC> - Exit";
+        let short_text =
+            "<←↓↑→/ENTER/TAB/Del> - Navigate/Expand/Reload/Close, <Ctrl a> - New, <ESC> - Exit";
         if cols >= full_text.chars().count() {
             let text = Text::new(full_text)
                 .color_range(3, 5..=11)
                 .color_range(3, 32..=38)
                 .color_range(3, 49..=53)
                 .color_range(3, 65..=69)
-                .color_range(3, 80..=87);
+                .color_range(3, 80..=87)
+                .color_range(3, 96..=100);
             print_text_with_coordinates(text, 0, y, Some(cols), None);
         } else if cols >= middle_text.chars().count() {
             let text = Text::new(middle_text)
                 .color_range(3, 6..=17)
                 .color_range(3, 31..=35)
                 .color_range(3, 47..=51)
-                .color_range(3, 62..=69);
+                .color_range(3, 62..=69)
+                .color_range(3, 78..=82);
             print_text_with_coordinates(text, 0, y, Some(cols), None);
         } else {
             let text = Text::new(short_text)
                 .color_range(3, ..=21)
-                .color_range(3, 53..=60);
+                .color_range(3, 53..=60)
+                .color_range(3, 69..=73);
             print_text_with_coordinates(text, 0, y, Some(cols), None);
         }
     }
@@ -989,17 +1021,21 @@ impl State {
             BareKey::Tab if key.has_no_modifiers() => {
                 self.reload_selected();
             },
-            BareKey::Insert if key.has_no_modifiers() => {
-                self.new_plugin_screen = Some(Default::default());
+            BareKey::Char('a') if key.has_modifiers(&[KeyModifier::Ctrl]) => {
+                self.new_plugin_screen = Some(NewPluginScreen::new(self.colors));
                 should_render = true;
             },
             BareKey::Delete if key.has_no_modifiers() => {
                 self.close_selected();
             },
             BareKey::Esc if key.has_no_modifiers() => {
-                self.search_term.clear();
-                self.update_search_term();
-                should_render = true;
+                if !self.search_term.is_empty() {
+                    self.search_term.clear();
+                    self.update_search_term();
+                    should_render = true;
+                } else {
+                    close_self();
+                }
             },
             _ => {},
         }

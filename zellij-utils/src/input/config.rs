@@ -10,7 +10,7 @@ use thiserror::Error;
 use std::convert::TryFrom;
 
 use super::keybinds::Keybinds;
-use super::layout::{RunPlugin, RunPluginOrAlias};
+use super::layout::RunPluginOrAlias;
 use super::options::Options;
 use super::plugins::{PluginAliases, PluginsConfigError};
 use super::theme::{Themes, UiConfig};
@@ -291,6 +291,11 @@ impl Config {
     }
     // returns true if the config was not previouly written to disk and we successfully wrote it
     pub fn write_config_to_disk_if_it_does_not_exist(config: String, opts: &CliArgs) -> bool {
+        if opts.config.is_none() {
+            // if a config file path wasn't explicitly specified, we try to create the default
+            // config folder
+            home::try_create_home_config_dir();
+        }
         match Config::config_file_path(opts) {
             Some(config_file_path) => {
                 if config_file_path.exists() {
@@ -402,10 +407,9 @@ impl Config {
 #[cfg(test)]
 mod config_test {
     use super::*;
-    use crate::data::{InputMode, Palette, PaletteColor, PluginTag};
-    use crate::input::layout::{RunPlugin, RunPluginLocation};
+    use crate::data::{InputMode, Palette, PaletteColor};
+    use crate::input::layout::RunPlugin;
     use crate::input::options::{Clipboard, OnForceClose};
-    use crate::input::plugins::PluginConfig;
     use crate::input::theme::{FrameConfig, Theme, Themes, UiConfig};
     use std::collections::{BTreeMap, HashMap};
     use std::io::Write;

@@ -507,10 +507,22 @@ pub fn minimize_lines(
 pub fn render_prompt(search_term: &str, colors: Colors, x: usize, y: usize) {
     let prompt = colors.green(&format!("Search:"));
     let search_term = colors.bold(&format!("{}_", search_term));
-    println!("\u{1b}[{};{}H{} {}\n", y + 1, x, prompt, search_term);
+    println!(
+        "\u{1b}[{};{}H\u{1b}[0m{} {}\n",
+        y + 1,
+        x,
+        prompt,
+        search_term
+    );
 }
 
-pub fn render_screen_toggle(active_screen: ActiveScreen, x: usize, y: usize, max_cols: usize) {
+pub fn render_screen_toggle(
+    active_screen: ActiveScreen,
+    x: usize,
+    y: usize,
+    max_cols: usize,
+    background: &PaletteColor,
+) {
     let key_indication_text = "<TAB>";
     let (new_session_text, running_sessions_text, exited_sessions_text) = if max_cols > 66 {
         ("New Session", "Attach to Session", "Resurrect Session")
@@ -538,13 +550,18 @@ pub fn render_screen_toggle(active_screen: ActiveScreen, x: usize, y: usize, max
             exited_sessions_text = exited_sessions_text.selected();
         },
     }
+    let bg_color = match background {
+        PaletteColor::Rgb((r, g, b)) => format!("\u{1b}[48;2;{};{};{}m\u{1b}[0K", r, g, b),
+        PaletteColor::EightBit(color) => format!("\u{1b}[48;5;{}m\u{1b}[0K", color),
+    };
     print_text_with_coordinates(
-        Text::new(key_indication_text).color_range(3, ..),
+        Text::new(key_indication_text).color_range(3, ..).opaque(),
         key_indication_x,
         y,
         None,
         None,
     );
+    println!("\u{1b}[{};{}H{}", y + 1, first_ribbon_x, bg_color);
     print_ribbon_with_coordinates(new_session_text, first_ribbon_x, y, None, None);
     print_ribbon_with_coordinates(running_sessions_text, second_ribbon_x, y, None, None);
     print_ribbon_with_coordinates(exited_sessions_text, third_ribbon_x, y, None, None);
