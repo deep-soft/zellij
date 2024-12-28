@@ -177,7 +177,9 @@ impl Pane for TerminalPane {
         self.reflow_lines();
     }
     fn set_geom(&mut self, position_and_size: PaneGeom) {
+        let is_pinned = self.geom.is_pinned;
         self.geom = position_and_size;
+        self.geom.is_pinned = is_pinned;
         self.reflow_lines();
         self.render_full_viewport();
     }
@@ -376,12 +378,14 @@ impl Pane for TerminalPane {
         };
 
         let frame_geom = self.current_geom();
+        let is_pinned = frame_geom.is_pinned;
         let mut frame = PaneFrame::new(
             frame_geom.into(),
             self.grid.scrollback_position_and_length(),
             pane_title,
             frame_params,
-        );
+        )
+        .is_pinned(is_pinned);
         if let Some((exit_status, is_first_run, _run_command)) = &self.is_held {
             if *is_first_run {
                 frame.indicate_first_run();
@@ -805,6 +809,41 @@ impl Pane for TerminalPane {
     fn update_rounded_corners(&mut self, rounded_corners: bool) {
         self.style.rounded_corners = rounded_corners;
         self.frame.clear();
+    }
+    fn drain_fake_cursors(&mut self) -> Option<HashSet<(usize, usize)>> {
+        if !self.fake_cursor_locations.is_empty() {
+            for (y, _x) in &self.fake_cursor_locations {
+                // we do this because once these fake_cursor_locations
+                // have been drained, we have to make sure to render the line
+                // they appeared on so that whatever clears their location
+                // won't leave a hole
+                self.grid.update_line_for_rendering(*y);
+            }
+            Some(self.fake_cursor_locations.drain().collect())
+        } else {
+            None
+        }
+    }
+    fn toggle_pinned(&mut self) {
+        self.geom.is_pinned = !self.geom.is_pinned;
+    }
+    fn set_pinned(&mut self, should_be_pinned: bool) {
+        self.geom.is_pinned = should_be_pinned;
+    }
+    fn intercept_left_mouse_click(&mut self, position: &Position, client_id: ClientId) -> bool {
+        if self.position_is_on_frame(position) {
+            let relative_position = self.relative_position(position);
+            if let Some(client_frame) = self.frame.get_mut(&client_id) {
+                if client_frame.clicked_on_pinned(relative_position) {
+                    self.toggle_pinned();
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    fn reset_logical_position(&mut self) {
+        self.geom.logical_position = None;
     }
 }
 

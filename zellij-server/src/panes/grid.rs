@@ -1144,7 +1144,7 @@ impl Grid {
         )));
     }
     pub fn cursor_coordinates(&self) -> Option<(usize, usize)> {
-        if self.cursor_is_hidden {
+        if self.cursor_is_hidden || self.cursor.x >= self.width || self.cursor.y >= self.height {
             None
         } else {
             Some((self.cursor.x, self.cursor.y))
@@ -2745,7 +2745,7 @@ impl Perform for Grid {
                 for param in params_iter.map(|param| param[0]) {
                     match param {
                         2026 => {
-                            let response = "\u{1b}[2026;2$y";
+                            let response = "\u{1b}[?2026;2$y";
                             self.pending_messages_to_pty
                                 .push(response.as_bytes().to_vec());
                         },

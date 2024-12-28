@@ -5,7 +5,7 @@ pub struct PluginCommand {
     pub name: i32,
     #[prost(
         oneof = "plugin_command::Payload",
-        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88"
+        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90"
     )]
     pub payload: ::core::option::Option<plugin_command::Payload>,
 }
@@ -174,7 +174,25 @@ pub mod plugin_command {
         LoadNewPluginPayload(super::LoadNewPluginPayload),
         #[prost(message, tag = "88")]
         RebindKeysPayload(super::RebindKeysPayload),
+        #[prost(message, tag = "89")]
+        ChangeHostFolderPayload(super::ChangeHostFolderPayload),
+        #[prost(message, tag = "90")]
+        SetFloatingPanePinnedPayload(super::SetFloatingPanePinnedPayload),
     }
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetFloatingPanePinnedPayload {
+    #[prost(message, optional, tag = "1")]
+    pub pane_id: ::core::option::Option<PaneId>,
+    #[prost(bool, tag = "2")]
+    pub should_be_pinned: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ChangeHostFolderPayload {
+    #[prost(string, tag = "1")]
+    pub new_host_folder: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -590,6 +608,8 @@ pub struct FloatingPaneCoordinates {
     pub width: ::core::option::Option<FixedOrPercentValue>,
     #[prost(message, optional, tag = "4")]
     pub height: ::core::option::Option<FixedOrPercentValue>,
+    #[prost(bool, optional, tag = "5")]
+    pub pinned: ::core::option::Option<bool>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -716,6 +736,8 @@ pub enum CommandName {
     LoadNewPlugin = 111,
     RebindKeys = 112,
     ListClients = 113,
+    ChangeHostFolder = 114,
+    SetFloatingPanePinned = 115,
 }
 impl CommandName {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -840,6 +862,8 @@ impl CommandName {
             CommandName::LoadNewPlugin => "LoadNewPlugin",
             CommandName::RebindKeys => "RebindKeys",
             CommandName::ListClients => "ListClients",
+            CommandName::ChangeHostFolder => "ChangeHostFolder",
+            CommandName::SetFloatingPanePinned => "SetFloatingPanePinned",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -961,6 +985,8 @@ impl CommandName {
             "LoadNewPlugin" => Some(Self::LoadNewPlugin),
             "RebindKeys" => Some(Self::RebindKeys),
             "ListClients" => Some(Self::ListClients),
+            "ChangeHostFolder" => Some(Self::ChangeHostFolder),
+            "SetFloatingPanePinned" => Some(Self::SetFloatingPanePinned),
             _ => None,
         }
     }
