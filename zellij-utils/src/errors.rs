@@ -374,6 +374,7 @@ pub enum ScreenContext {
     TogglePanePinned,
     SetFloatingPanePinned,
     StackPanes,
+    ChangeFloatingPanesCoordinates,
 }
 
 /// Stack call representations corresponding to the different types of [`PtyInstruction`]s.
@@ -449,7 +450,6 @@ pub enum ClientContext {
     ServerError,
     SwitchToMode,
     Connected,
-    ActiveClients,
     Log,
     LogError,
     OwnClientId,
@@ -476,7 +476,6 @@ pub enum ServerContext {
     DetachSession,
     AttachClient,
     ConnStatus,
-    ActiveClients,
     Log,
     LogError,
     SwitchSession,
@@ -606,7 +605,7 @@ mod not_wasm {
     use super::*;
     use crate::channels::{SenderWithContext, ASYNCOPENCALLS, OPENCALLS};
     use miette::{Diagnostic, GraphicalReportHandler, GraphicalTheme, Report};
-    use std::panic::PanicInfo;
+    use std::panic::PanicHookInfo;
     use thiserror::Error as ThisError;
 
     /// The maximum amount of calls an [`ErrorContext`] will keep track
@@ -651,7 +650,7 @@ mod not_wasm {
     }
 
     /// Custom panic handler/hook. Prints the [`ErrorContext`].
-    pub fn handle_panic<T>(info: &PanicInfo<'_>, sender: &SenderWithContext<T>)
+    pub fn handle_panic<T>(info: &PanicHookInfo<'_>, sender: &SenderWithContext<T>)
     where
         T: ErrorInstruction + Clone,
     {

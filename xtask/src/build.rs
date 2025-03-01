@@ -22,7 +22,7 @@ pub fn build(sh: &Shell, flags: flags::Build) -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    for WorkspaceMember { crate_name, .. } in crate::WORKSPACE_MEMBERS
+    for WorkspaceMember { crate_name, .. } in crate::workspace_members()
         .iter()
         .filter(|member| member.build)
     {
@@ -32,10 +32,8 @@ pub fn build(sh: &Shell, flags: flags::Build) -> anyhow::Result<()> {
             if flags.no_plugins {
                 continue;
             }
-        } else {
-            if flags.plugins_only {
-                continue;
-            }
+        } else if flags.plugins_only {
+            continue;
         }
 
         // zellij-utils requires protobuf definition files to be present. Usually these are
@@ -127,7 +125,7 @@ fn move_plugin_to_assets(sh: &Shell, plugin_name: &str) -> anyhow::Result<()> {
         std::env::var_os("CARGO_TARGET_DIR")
             .unwrap_or(crate::project_root().join("target").into_os_string()),
     )
-    .join("wasm32-wasi")
+    .join("wasm32-wasip1")
     .join("release")
     .join(plugin_name)
     .with_extension("wasm");
@@ -153,7 +151,7 @@ pub fn manpage(sh: &Shell) -> anyhow::Result<()> {
 
     let project_root = crate::project_root();
     let asset_dir = &project_root.join("assets").join("man");
-    sh.create_dir(&asset_dir).context(err_context)?;
+    sh.create_dir(asset_dir).context(err_context)?;
     let _pd = sh.push_dir(asset_dir);
 
     cmd!(sh, "{mandown} {project_root}/docs/MANPAGE.md 1")

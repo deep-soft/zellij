@@ -47,7 +47,9 @@ pub(crate) fn route_action(
     let mut should_break = false;
     let err_context = || format!("failed to route action for client {client_id}");
 
-    if !action.is_mouse_motion() {
+    if !action.is_mouse_action() {
+        // mouse actions should only send InputReceived to plugins
+        // if they do not result in text being marked, this is handled in Tab
         senders
             .send_to_plugin(PluginInstruction::Update(vec![(
                 None,
@@ -312,11 +314,13 @@ pub(crate) fn route_action(
                     Some(pane_id) => PtyInstruction::SpawnInPlaceTerminal(
                         Some(open_file),
                         Some(title),
+                        false,
                         ClientTabIndexOrPaneId::PaneId(pane_id),
                     ),
                     None => PtyInstruction::SpawnInPlaceTerminal(
                         Some(open_file),
                         Some(title),
+                        false,
                         ClientTabIndexOrPaneId::ClientId(client_id),
                     ),
                 },
@@ -389,6 +393,7 @@ pub(crate) fn route_action(
                         .send_to_pty(PtyInstruction::SpawnInPlaceTerminal(
                             run_cmd,
                             name,
+                            false,
                             ClientTabIndexOrPaneId::PaneId(pane_id),
                         ))
                         .with_context(err_context)?;
@@ -398,6 +403,7 @@ pub(crate) fn route_action(
                         .send_to_pty(PtyInstruction::SpawnInPlaceTerminal(
                             run_cmd,
                             name,
+                            false,
                             ClientTabIndexOrPaneId::ClientId(client_id),
                         ))
                         .with_context(err_context)?;
@@ -935,6 +941,14 @@ pub(crate) fn route_action(
                 ))
                 .with_context(err_context)?;
         },
+        Action::ChangeFloatingPaneCoordinates(pane_id, coordinates) => {
+            senders
+                .send_to_screen(ScreenInstruction::ChangeFloatingPanesCoordinates(vec![(
+                    pane_id.into(),
+                    coordinates,
+                )]))
+                .with_context(err_context)?;
+        },
     }
     Ok(should_break)
 }
@@ -1173,9 +1187,6 @@ pub(crate) fn route_thread_main(
                         ClientToServerMsg::DetachSession(client_id) => {
                             let _ = to_server.send(ServerInstruction::DetachSession(client_id));
                             should_break = true;
-                        },
-                        ClientToServerMsg::ListClients => {
-                            let _ = to_server.send(ServerInstruction::ActiveClients(client_id));
                         },
                         ClientToServerMsg::ConfigWrittenToDisk(config) => {
                             let _ = to_server

@@ -1,6 +1,6 @@
 pub mod floating_pane_grid;
 use zellij_utils::{
-    data::{Direction, PaneInfo, ResizeStrategy},
+    data::{Direction, FloatingPaneCoordinates, PaneInfo, ResizeStrategy},
     position::Position,
 };
 
@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
 use zellij_utils::{
-    data::{ModeInfo, Palette, Style},
+    data::{ModeInfo, Style, Styling},
     errors::prelude::*,
     input::command::RunCommand,
     input::layout::{FloatingPaneLayout, Run, RunPluginOrAlias},
@@ -728,6 +728,28 @@ impl FloatingPanes {
             let _ = self.set_pane_frames();
         }
     }
+    pub fn change_pane_coordinates(
+        &mut self,
+        pane_id: PaneId,
+        new_coordinates: FloatingPaneCoordinates,
+    ) -> Result<()> {
+        let err_context = || format!("Failed to change_pane_coordinates");
+
+        {
+            let viewport = { self.viewport.borrow().clone() };
+            let pane = self.get_pane_mut(pane_id).with_context(err_context)?;
+            let mut pane_geom = pane.position_and_size();
+            if let Some(pinned) = new_coordinates.pinned.as_ref() {
+                pane.set_pinned(*pinned);
+            }
+            pane_geom.adjust_coordinates(new_coordinates, viewport);
+            pane.set_geom(pane_geom);
+            pane.set_should_render(true);
+            self.desired_pane_positions.insert(pane_id, pane_geom);
+        }
+        let _ = self.set_pane_frames();
+        Ok(())
+    }
     pub fn move_clients_out_of_pane(&mut self, pane_id: PaneId) {
         let active_panes: Vec<(ClientId, PaneId)> = self
             .active_panes
@@ -793,6 +815,16 @@ impl FloatingPanes {
         match self.active_panes.get(&client_id) {
             Some(already_focused_pane_id) => self.focus_pane(*already_focused_pane_id, client_id),
             None => self.focus_pane(pane_id, client_id),
+        }
+    }
+    pub fn focus_first_pane_if_client_not_focused(&mut self, client_id: ClientId) {
+        match self.active_panes.get(&client_id) {
+            Some(already_focused_pane_id) => self.focus_pane(*already_focused_pane_id, client_id),
+            None => {
+                if let Some(first_pane_id) = self.panes.iter().next().map(|(p_id, _)| *p_id) {
+                    self.focus_pane(first_pane_id, client_id);
+                }
+            },
         }
     }
     pub fn defocus_pane(&mut self, pane_id: PaneId, client_id: ClientId) {
@@ -1090,7 +1122,7 @@ impl FloatingPanes {
             },
         }
     }
-    pub fn update_pane_themes(&mut self, theme: Palette) {
+    pub fn update_pane_themes(&mut self, theme: Styling) {
         self.style.colors = theme;
         for pane in self.panes.values_mut() {
             pane.update_theme(theme);

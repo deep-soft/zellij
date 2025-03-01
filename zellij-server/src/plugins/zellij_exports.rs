@@ -101,17 +101,41 @@ fn host_run_plugin_command(caller: Caller<'_, PluginEnv>) {
                         context,
                     ) => open_file_floating(env, file_to_open, floating_pane_coordinates, context),
                     PluginCommand::OpenTerminal(cwd) => open_terminal(env, cwd.path.try_into()?),
+                    PluginCommand::OpenTerminalNearPlugin(cwd) => {
+                        open_terminal_near_plugin(env, cwd.path.try_into()?)
+                    },
                     PluginCommand::OpenTerminalFloating(cwd, floating_pane_coordinates) => {
                         open_terminal_floating(env, cwd.path.try_into()?, floating_pane_coordinates)
                     },
+                    PluginCommand::OpenTerminalFloatingNearPlugin(
+                        cwd,
+                        floating_pane_coordinates,
+                    ) => open_terminal_floating_near_plugin(
+                        env,
+                        cwd.path.try_into()?,
+                        floating_pane_coordinates,
+                    ),
                     PluginCommand::OpenCommandPane(command_to_run, context) => {
                         open_command_pane(env, command_to_run, context)
+                    },
+                    PluginCommand::OpenCommandPaneNearPlugin(command_to_run, context) => {
+                        open_command_pane_near_plugin(env, command_to_run, context)
                     },
                     PluginCommand::OpenCommandPaneFloating(
                         command_to_run,
                         floating_pane_coordinates,
                         context,
                     ) => open_command_pane_floating(
+                        env,
+                        command_to_run,
+                        floating_pane_coordinates,
+                        context,
+                    ),
+                    PluginCommand::OpenCommandPaneFloatingNearPlugin(
+                        command_to_run,
+                        floating_pane_coordinates,
+                        context,
+                    ) => open_command_pane_floating_near_plugin(
                         env,
                         command_to_run,
                         floating_pane_coordinates,
@@ -232,9 +256,26 @@ fn host_run_plugin_command(caller: Caller<'_, PluginEnv>) {
                     PluginCommand::OpenTerminalInPlace(cwd) => {
                         open_terminal_in_place(env, cwd.path.try_into()?)
                     },
+                    PluginCommand::OpenTerminalInPlaceOfPlugin(cwd, close_plugin_after_replace) => {
+                        open_terminal_in_place_of_plugin(
+                            env,
+                            cwd.path.try_into()?,
+                            close_plugin_after_replace,
+                        )
+                    },
                     PluginCommand::OpenCommandPaneInPlace(command_to_run, context) => {
                         open_command_pane_in_place(env, command_to_run, context)
                     },
+                    PluginCommand::OpenCommandPaneInPlaceOfPlugin(
+                        command_to_run,
+                        close_plugin_after_replace,
+                        context,
+                    ) => open_command_pane_in_place_of_plugin(
+                        env,
+                        command_to_run,
+                        close_plugin_after_replace,
+                        context,
+                    ),
                     PluginCommand::RenameSession(new_session_name) => {
                         rename_session(env, new_session_name)
                     },
@@ -361,6 +402,38 @@ fn host_run_plugin_command(caller: Caller<'_, PluginEnv>) {
                     PluginCommand::StackPanes(pane_ids) => {
                         stack_panes(env, pane_ids.into_iter().map(|p_id| p_id.into()).collect())
                     },
+                    PluginCommand::ChangeFloatingPanesCoordinates(pane_ids_and_coordinates) => {
+                        change_floating_panes_coordinates(
+                            env,
+                            pane_ids_and_coordinates
+                                .into_iter()
+                                .map(|(p_id, coordinates)| (p_id.into(), coordinates))
+                                .collect(),
+                        )
+                    },
+                    PluginCommand::OpenFileNearPlugin(file_to_open, context) => {
+                        open_file_near_plugin(env, file_to_open, context)
+                    },
+                    PluginCommand::OpenFileFloatingNearPlugin(
+                        file_to_open,
+                        floating_pane_coordinates,
+                        context,
+                    ) => open_file_floating_near_plugin(
+                        env,
+                        file_to_open,
+                        floating_pane_coordinates,
+                        context,
+                    ),
+                    PluginCommand::OpenFileInPlaceOfPlugin(
+                        file_to_open,
+                        close_plugin_after_replace,
+                        context,
+                    ) => open_file_in_place_of_plugin(
+                        env,
+                        file_to_open,
+                        close_plugin_after_replace,
+                        context,
+                    ),
                 },
                 (PermissionStatus::Denied, permission) => {
                     log::error!(
@@ -586,6 +659,91 @@ fn open_file_in_place(
     apply_action!(action, error_msg, env);
 }
 
+fn open_file_near_plugin(
+    env: &PluginEnv,
+    file_to_open: FileToOpen,
+    context: BTreeMap<String, String>,
+) {
+    let cwd = file_to_open
+        .cwd
+        .map(|cwd| env.plugin_cwd.join(cwd))
+        .or_else(|| Some(env.plugin_cwd.clone()));
+    let path = env.plugin_cwd.join(file_to_open.path);
+    let open_file_payload =
+        OpenFilePayload::new(path, file_to_open.line_number, cwd).with_originating_plugin(
+            OriginatingPlugin::new(env.plugin_id, env.client_id, context),
+        );
+    let title = format!("Editing: {}", open_file_payload.path.display());
+    let should_float = false;
+    let start_suppressed = false;
+    let open_file = TerminalAction::OpenFile(open_file_payload);
+    let pty_instr = PtyInstruction::SpawnTerminal(
+        Some(open_file),
+        Some(should_float),
+        Some(title),
+        None,
+        start_suppressed,
+        ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(env.plugin_id)),
+    );
+    let _ = env.senders.send_to_pty(pty_instr);
+}
+
+fn open_file_floating_near_plugin(
+    env: &PluginEnv,
+    file_to_open: FileToOpen,
+    floating_pane_coordinates: Option<FloatingPaneCoordinates>,
+    context: BTreeMap<String, String>,
+) {
+    let cwd = file_to_open
+        .cwd
+        .map(|cwd| env.plugin_cwd.join(cwd))
+        .or_else(|| Some(env.plugin_cwd.clone()));
+    let path = env.plugin_cwd.join(file_to_open.path);
+    let open_file_payload =
+        OpenFilePayload::new(path, file_to_open.line_number, cwd).with_originating_plugin(
+            OriginatingPlugin::new(env.plugin_id, env.client_id, context),
+        );
+    let title = format!("Editing: {}", open_file_payload.path.display());
+    let should_float = true;
+    let start_suppressed = false;
+    let open_file = TerminalAction::OpenFile(open_file_payload);
+    let pty_instr = PtyInstruction::SpawnTerminal(
+        Some(open_file),
+        Some(should_float),
+        Some(title),
+        floating_pane_coordinates,
+        start_suppressed,
+        ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(env.plugin_id)),
+    );
+    let _ = env.senders.send_to_pty(pty_instr);
+}
+
+fn open_file_in_place_of_plugin(
+    env: &PluginEnv,
+    file_to_open: FileToOpen,
+    close_plugin_after_replace: bool,
+    context: BTreeMap<String, String>,
+) {
+    let cwd = file_to_open
+        .cwd
+        .map(|cwd| env.plugin_cwd.join(cwd))
+        .or_else(|| Some(env.plugin_cwd.clone()));
+    let path = env.plugin_cwd.join(file_to_open.path);
+    let open_file_payload =
+        OpenFilePayload::new(path, file_to_open.line_number, cwd).with_originating_plugin(
+            OriginatingPlugin::new(env.plugin_id, env.client_id, context),
+        );
+    let title = format!("Editing: {}", open_file_payload.path.display());
+    let open_file = TerminalAction::OpenFile(open_file_payload);
+    let pty_instr = PtyInstruction::SpawnInPlaceTerminal(
+        Some(open_file),
+        Some(title),
+        close_plugin_after_replace,
+        ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(env.plugin_id)),
+    );
+    let _ = env.senders.send_to_pty(pty_instr);
+}
+
 fn open_terminal(env: &PluginEnv, cwd: PathBuf) {
     let error_msg = || format!("failed to open file in plugin {}", env.name());
     let cwd = env.plugin_cwd.join(cwd);
@@ -602,6 +760,27 @@ fn open_terminal(env: &PluginEnv, cwd: PathBuf) {
     };
     let action = Action::NewTiledPane(None, run_command_action, None);
     apply_action!(action, error_msg, env);
+}
+
+fn open_terminal_near_plugin(env: &PluginEnv, cwd: PathBuf) {
+    let cwd = env.plugin_cwd.join(cwd);
+    let should_float = false;
+    let mut default_shell = env.default_shell.clone().unwrap_or_else(|| {
+        TerminalAction::RunCommand(RunCommand {
+            command: env.path_to_default_shell.clone(),
+            ..Default::default()
+        })
+    });
+    let name = None;
+    default_shell.change_cwd(cwd);
+    let _ = env.senders.send_to_pty(PtyInstruction::SpawnTerminal(
+        Some(default_shell),
+        Some(should_float),
+        name,
+        None,
+        false,
+        ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(env.plugin_id)),
+    ));
 }
 
 fn open_terminal_floating(
@@ -626,6 +805,31 @@ fn open_terminal_floating(
     apply_action!(action, error_msg, env);
 }
 
+fn open_terminal_floating_near_plugin(
+    env: &PluginEnv,
+    cwd: PathBuf,
+    floating_pane_coordinates: Option<FloatingPaneCoordinates>,
+) {
+    let cwd = env.plugin_cwd.join(cwd);
+    let should_float = true;
+    let mut default_shell = env.default_shell.clone().unwrap_or_else(|| {
+        TerminalAction::RunCommand(RunCommand {
+            command: env.path_to_default_shell.clone(),
+            ..Default::default()
+        })
+    });
+    default_shell.change_cwd(cwd);
+    let name = None;
+    let _ = env.senders.send_to_pty(PtyInstruction::SpawnTerminal(
+        Some(default_shell),
+        Some(should_float),
+        name,
+        floating_pane_coordinates,
+        false,
+        ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(env.plugin_id)),
+    ));
+}
+
 fn open_terminal_in_place(env: &PluginEnv, cwd: PathBuf) {
     let error_msg = || format!("failed to open file in plugin {}", env.name());
     let cwd = env.plugin_cwd.join(cwd);
@@ -642,6 +846,67 @@ fn open_terminal_in_place(env: &PluginEnv, cwd: PathBuf) {
     };
     let action = Action::NewInPlacePane(run_command_action, None);
     apply_action!(action, error_msg, env);
+}
+
+fn open_terminal_in_place_of_plugin(
+    env: &PluginEnv,
+    cwd: PathBuf,
+    close_plugin_after_replace: bool,
+) {
+    let cwd = env.plugin_cwd.join(cwd);
+    let mut default_shell = env.default_shell.clone().unwrap_or_else(|| {
+        TerminalAction::RunCommand(RunCommand {
+            command: env.path_to_default_shell.clone(),
+            ..Default::default()
+        })
+    });
+    default_shell.change_cwd(cwd);
+    let name = None;
+    let _ = env
+        .senders
+        .send_to_pty(PtyInstruction::SpawnInPlaceTerminal(
+            Some(default_shell),
+            name,
+            close_plugin_after_replace,
+            ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(env.plugin_id)),
+        ));
+}
+
+fn open_command_pane_in_place_of_plugin(
+    env: &PluginEnv,
+    command_to_run: CommandToRun,
+    close_plugin_after_replace: bool,
+    context: BTreeMap<String, String>,
+) {
+    let command = command_to_run.path;
+    let cwd = command_to_run.cwd.map(|cwd| env.plugin_cwd.join(cwd));
+    let args = command_to_run.args;
+    let direction = None;
+    let hold_on_close = true;
+    let hold_on_start = false;
+    let name = None;
+    let run_command_action = RunCommandAction {
+        command,
+        args,
+        cwd,
+        direction,
+        hold_on_close,
+        hold_on_start,
+        originating_plugin: Some(OriginatingPlugin::new(
+            env.plugin_id,
+            env.client_id,
+            context,
+        )),
+    };
+    let run_cmd = TerminalAction::RunCommand(run_command_action.into());
+    let _ = env
+        .senders
+        .send_to_pty(PtyInstruction::SpawnInPlaceTerminal(
+            Some(run_cmd),
+            name,
+            close_plugin_after_replace,
+            ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(env.plugin_id)),
+        ));
 }
 
 fn open_command_pane(
@@ -674,6 +939,43 @@ fn open_command_pane(
     apply_action!(action, error_msg, env);
 }
 
+fn open_command_pane_near_plugin(
+    env: &PluginEnv,
+    command_to_run: CommandToRun,
+    context: BTreeMap<String, String>,
+) {
+    let command = command_to_run.path;
+    let cwd = command_to_run.cwd.map(|cwd| env.plugin_cwd.join(cwd));
+    let args = command_to_run.args;
+    let direction = None;
+    let hold_on_close = true;
+    let hold_on_start = false;
+    let name = None;
+    let should_float = false;
+    let run_command_action = RunCommandAction {
+        command,
+        args,
+        cwd,
+        direction,
+        hold_on_close,
+        hold_on_start,
+        originating_plugin: Some(OriginatingPlugin::new(
+            env.plugin_id,
+            env.client_id,
+            context,
+        )),
+    };
+    let run_cmd = TerminalAction::RunCommand(run_command_action.into());
+    let _ = env.senders.send_to_pty(PtyInstruction::SpawnTerminal(
+        Some(run_cmd),
+        Some(should_float),
+        name,
+        None,
+        false,
+        ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(env.plugin_id)),
+    ));
+}
+
 fn open_command_pane_floating(
     env: &PluginEnv,
     command_to_run: CommandToRun,
@@ -703,6 +1005,44 @@ fn open_command_pane_floating(
     };
     let action = Action::NewFloatingPane(Some(run_command_action), name, floating_pane_coordinates);
     apply_action!(action, error_msg, env);
+}
+
+fn open_command_pane_floating_near_plugin(
+    env: &PluginEnv,
+    command_to_run: CommandToRun,
+    floating_pane_coordinates: Option<FloatingPaneCoordinates>,
+    context: BTreeMap<String, String>,
+) {
+    let command = command_to_run.path;
+    let cwd = command_to_run.cwd.map(|cwd| env.plugin_cwd.join(cwd));
+    let args = command_to_run.args;
+    let direction = None;
+    let hold_on_close = true;
+    let hold_on_start = false;
+    let name = None;
+    let should_float = true;
+    let run_command_action = RunCommandAction {
+        command,
+        args,
+        cwd,
+        direction,
+        hold_on_close,
+        hold_on_start,
+        originating_plugin: Some(OriginatingPlugin::new(
+            env.plugin_id,
+            env.client_id,
+            context,
+        )),
+    };
+    let run_cmd = TerminalAction::RunCommand(run_command_action.into());
+    let _ = env.senders.send_to_pty(PtyInstruction::SpawnTerminal(
+        Some(run_cmd),
+        Some(should_float),
+        name,
+        floating_pane_coordinates,
+        false,
+        ClientTabIndexOrPaneId::PaneId(PaneId::Plugin(env.plugin_id)),
+    ));
 }
 
 fn open_command_pane_in_place(
@@ -1530,6 +1870,17 @@ fn stack_panes(env: &PluginEnv, pane_ids: Vec<PaneId>) {
         .send_to_screen(ScreenInstruction::StackPanes(pane_ids));
 }
 
+fn change_floating_panes_coordinates(
+    env: &PluginEnv,
+    pane_ids_and_coordinates: Vec<(PaneId, FloatingPaneCoordinates)>,
+) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::ChangeFloatingPanesCoordinates(
+            pane_ids_and_coordinates,
+        ));
+}
+
 fn scan_host_folder(env: &PluginEnv, folder_to_scan: PathBuf) {
     if !folder_to_scan.starts_with("/host") {
         log::error!(
@@ -1861,14 +2212,23 @@ fn check_command_permission(
     let permission = match command {
         PluginCommand::OpenFile(..)
         | PluginCommand::OpenFileFloating(..)
+        | PluginCommand::OpenFileNearPlugin(..)
+        | PluginCommand::OpenFileFloatingNearPlugin(..)
+        | PluginCommand::OpenFileInPlaceOfPlugin(..)
         | PluginCommand::OpenFileInPlace(..) => PermissionType::OpenFiles,
         PluginCommand::OpenTerminal(..)
+        | PluginCommand::OpenTerminalNearPlugin(..)
         | PluginCommand::StartOrReloadPlugin(..)
         | PluginCommand::OpenTerminalFloating(..)
-        | PluginCommand::OpenTerminalInPlace(..) => PermissionType::OpenTerminalsOrPlugins,
+        | PluginCommand::OpenTerminalFloatingNearPlugin(..)
+        | PluginCommand::OpenTerminalInPlace(..)
+        | PluginCommand::OpenTerminalInPlaceOfPlugin(..) => PermissionType::OpenTerminalsOrPlugins,
         PluginCommand::OpenCommandPane(..)
+        | PluginCommand::OpenCommandPaneNearPlugin(..)
         | PluginCommand::OpenCommandPaneFloating(..)
+        | PluginCommand::OpenCommandPaneFloatingNearPlugin(..)
         | PluginCommand::OpenCommandPaneInPlace(..)
+        | PluginCommand::OpenCommandPaneInPlaceOfPlugin(..)
         | PluginCommand::OpenCommandPaneBackground(..)
         | PluginCommand::RunCommand(..)
         | PluginCommand::ExecCmd(..) => PermissionType::RunCommands,
@@ -1950,6 +2310,7 @@ fn check_command_permission(
         | PluginCommand::LoadNewPlugin { .. }
         | PluginCommand::SetFloatingPanePinned(..)
         | PluginCommand::StackPanes(..)
+        | PluginCommand::ChangeFloatingPanesCoordinates(..)
         | PluginCommand::KillSessions(..) => PermissionType::ChangeApplicationState,
         PluginCommand::UnblockCliPipeInput(..)
         | PluginCommand::BlockCliPipeInput(..)
