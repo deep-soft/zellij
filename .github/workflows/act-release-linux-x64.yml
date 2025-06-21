@@ -191,9 +191,9 @@ jobs:
         with:
           prefix-key: ${{ matrix.os }}
 
-#      - name: Add WASM target
-#        run: |
-#          rustup target add wasm32-wasip1
+      - name: Add WASM target
+        run: |
+          rustup target add wasm32-wasip1
 
       - name: Install musl-tools
         if: matrix.os == 'ubuntu-latest'
