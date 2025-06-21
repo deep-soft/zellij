@@ -5,6 +5,8 @@ use crate::plugins::wasm_bridge::handle_plugin_crash;
 use crate::pty::{ClientTabIndexOrPaneId, PtyInstruction};
 use crate::route::route_action;
 use crate::ServerInstruction;
+use async_std::task;
+use interprocess::local_socket::LocalSocketStream;
 use log::warn;
 use serde::Serialize;
 use std::{
@@ -22,14 +24,11 @@ use zellij_utils::data::{
     MessageToPlugin, OriginatingPlugin, PermissionStatus, PermissionType, PluginPermission,
 };
 use zellij_utils::input::permission::PermissionCache;
-use zellij_utils::{
-    async_std::task,
-    interprocess::local_socket::LocalSocketStream,
-    ipc::{ClientToServerMsg, IpcSenderWithContext},
-};
+use zellij_utils::ipc::{ClientToServerMsg, IpcSenderWithContext};
 
 use crate::{panes::PaneId, screen::ScreenInstruction};
 
+use prost::Message;
 use zellij_utils::{
     consts::{VERSION, ZELLIJ_SESSION_INFO_CACHE_DIR, ZELLIJ_SOCK_DIR},
     data::{
@@ -46,8 +45,6 @@ use zellij_utils::{
         plugin_command::ProtobufPluginCommand,
         plugin_ids::{ProtobufPluginIds, ProtobufZellijVersion},
     },
-    prost::Message,
-    serde,
 };
 
 macro_rules! apply_action {
@@ -76,9 +73,10 @@ pub fn zellij_exports(linker: &mut Linker<PluginEnv>) {
         .unwrap();
 }
 
-fn host_run_plugin_command(caller: Caller<'_, PluginEnv>) {
-    let env = caller.data();
-    let err_context = || format!("failed to run plugin command {}", env.name());
+fn host_run_plugin_command(mut caller: Caller<'_, PluginEnv>) {
+    let mut env = caller.data_mut();
+    let plugin_command = env.name();
+    let err_context = || format!("failed to run plugin command {}", plugin_command);
     wasi_read_bytes(env)
         .and_then(|bytes| {
             let command: ProtobufPluginCommand = ProtobufPluginCommand::decode(bytes.as_slice())?;
@@ -434,6 +432,34 @@ fn host_run_plugin_command(caller: Caller<'_, PluginEnv>) {
                         close_plugin_after_replace,
                         context,
                     ),
+                    PluginCommand::GroupAndUngroupPanes(panes_to_group, panes_to_ungroup) => {
+                        group_and_ungroup_panes(
+                            env,
+                            panes_to_group.into_iter().map(|p| p.into()).collect(),
+                            panes_to_ungroup.into_iter().map(|p| p.into()).collect(),
+                        )
+                    },
+                    PluginCommand::HighlightAndUnhighlightPanes(
+                        panes_to_highlight,
+                        panes_to_unhighlight,
+                    ) => highlight_and_unhighlight_panes(
+                        env,
+                        panes_to_highlight.into_iter().map(|p| p.into()).collect(),
+                        panes_to_unhighlight.into_iter().map(|p| p.into()).collect(),
+                    ),
+                    PluginCommand::CloseMultiplePanes(pane_ids) => {
+                        close_multiple_panes(env, pane_ids.into_iter().map(|p| p.into()).collect())
+                    },
+                    PluginCommand::FloatMultiplePanes(pane_ids) => {
+                        float_multiple_panes(env, pane_ids.into_iter().map(|p| p.into()).collect())
+                    },
+                    PluginCommand::EmbedMultiplePanes(pane_ids) => {
+                        embed_multiple_panes(env, pane_ids.into_iter().map(|p| p.into()).collect())
+                    },
+                    PluginCommand::InterceptKeyPresses => intercept_key_presses(&mut env),
+                    PluginCommand::ClearKeyPressesIntercepts => {
+                        clear_key_presses_intercepts(&mut env)
+                    },
                 },
                 (PermissionStatus::Denied, permission) => {
                     log::error!(
@@ -550,6 +576,7 @@ fn get_plugin_ids(env: &PluginEnv) {
         plugin_id: env.plugin_id,
         zellij_pid: process::id(),
         initial_cwd: env.plugin_cwd.clone(),
+        client_id: env.client_id,
     };
     ProtobufPluginIds::try_from(ids)
         .map_err(|e| anyhow!("Failed to serialized plugin ids: {}", e))
@@ -1867,7 +1894,7 @@ fn set_floating_pane_pinned(env: &PluginEnv, pane_id: PaneId, should_be_pinned: 
 fn stack_panes(env: &PluginEnv, pane_ids: Vec<PaneId>) {
     let _ = env
         .senders
-        .send_to_screen(ScreenInstruction::StackPanes(pane_ids));
+        .send_to_screen(ScreenInstruction::StackPanes(pane_ids, env.client_id));
 }
 
 fn change_floating_panes_coordinates(
@@ -2141,6 +2168,8 @@ fn load_new_plugin(
                     size,
                     cwd,
                     skip_cache,
+                    None,
+                    None,
                 ));
             },
             Err(e) => {
@@ -2148,6 +2177,82 @@ fn load_new_plugin(
             },
         }
     }
+}
+
+fn group_and_ungroup_panes(
+    env: &PluginEnv,
+    panes_to_group: Vec<PaneId>,
+    panes_to_ungroup: Vec<PaneId>,
+) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::GroupAndUngroupPanes(
+            panes_to_group,
+            panes_to_ungroup,
+            env.client_id,
+        ));
+}
+
+fn highlight_and_unhighlight_panes(
+    env: &PluginEnv,
+    panes_to_highlight: Vec<PaneId>,
+    panes_to_unhighlight: Vec<PaneId>,
+) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::HighlightAndUnhighlightPanes(
+            panes_to_highlight,
+            panes_to_unhighlight,
+            env.client_id,
+        ));
+}
+
+fn close_multiple_panes(env: &PluginEnv, pane_ids: Vec<PaneId>) {
+    for pane_id in pane_ids {
+        match pane_id {
+            PaneId::Terminal(terminal_pane_id) => {
+                close_terminal_pane(env, terminal_pane_id);
+            },
+            PaneId::Plugin(plugin_pane_id) => {
+                close_plugin_pane(env, plugin_pane_id);
+            },
+        }
+    }
+}
+
+fn float_multiple_panes(env: &PluginEnv, pane_ids: Vec<PaneId>) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::FloatMultiplePanes(
+            pane_ids,
+            env.client_id,
+        ));
+}
+
+fn embed_multiple_panes(env: &PluginEnv, pane_ids: Vec<PaneId>) {
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::EmbedMultiplePanes(
+            pane_ids,
+            env.client_id,
+        ));
+}
+
+fn intercept_key_presses(env: &mut PluginEnv) {
+    env.intercepting_key_presses = true;
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::InterceptKeyPresses(
+            env.plugin_id,
+            env.client_id,
+        ));
+}
+
+fn clear_key_presses_intercepts(env: &mut PluginEnv) {
+    env.intercepting_key_presses = false;
+    let _ = env
+        .senders
+        .send_to_screen(ScreenInstruction::ClearKeyPressesIntercepts(env.client_id));
 }
 
 // Custom panic handler for plugins.
@@ -2311,6 +2416,11 @@ fn check_command_permission(
         | PluginCommand::SetFloatingPanePinned(..)
         | PluginCommand::StackPanes(..)
         | PluginCommand::ChangeFloatingPanesCoordinates(..)
+        | PluginCommand::GroupAndUngroupPanes(..)
+        | PluginCommand::HighlightAndUnhighlightPanes(..)
+        | PluginCommand::CloseMultiplePanes(..)
+        | PluginCommand::FloatMultiplePanes(..)
+        | PluginCommand::EmbedMultiplePanes(..)
         | PluginCommand::KillSessions(..) => PermissionType::ChangeApplicationState,
         PluginCommand::UnblockCliPipeInput(..)
         | PluginCommand::BlockCliPipeInput(..)
@@ -2323,6 +2433,9 @@ fn check_command_permission(
             PermissionType::Reconfigure
         },
         PluginCommand::ChangeHostFolder(..) => PermissionType::FullHdAccess,
+        PluginCommand::InterceptKeyPresses | PluginCommand::ClearKeyPressesIntercepts => {
+            PermissionType::InterceptInput
+        },
         _ => return (PermissionStatus::Granted, None),
     };
 

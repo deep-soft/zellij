@@ -8,12 +8,14 @@ use crate::{
     thread_bus::{Bus, ThreadSenders},
     ClientId, ServerInstruction,
 };
-use async_std::task::{self, JoinHandle};
+use async_std::{
+    self,
+    task::{self, JoinHandle},
+};
+use nix::unistd::Pid;
 use std::sync::Arc;
 use std::{collections::HashMap, os::unix::io::RawFd, path::PathBuf};
-use zellij_utils::nix::unistd::Pid;
 use zellij_utils::{
-    async_std,
     data::{Event, FloatingPaneCoordinates, OriginatingPlugin},
     errors::prelude::*,
     errors::{ContextType, PtyContext},
@@ -95,6 +97,7 @@ pub enum PtyInstruction {
         Size,
         bool,            // skip cache
         Option<PathBuf>, // if Some, will not fill cwd but just forward the message
+        Option<bool>,    // should focus plugin
         Option<FloatingPaneCoordinates>,
     ),
     ListClientsMetadata(SessionLayoutMetadata, ClientId),
@@ -769,6 +772,7 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                 size,
                 skip_cache,
                 cwd,
+                should_focus_plugin,
                 floating_pane_coordinates,
             ) => {
                 pty.fill_plugin_cwd(
@@ -782,6 +786,7 @@ pub(crate) fn pty_thread_main(mut pty: Pty, layout: Box<Layout>) -> Result<()> {
                     size,
                     skip_cache,
                     cwd,
+                    should_focus_plugin,
                     floating_pane_coordinates,
                 )?;
             },
@@ -1525,9 +1530,8 @@ impl Pty {
         size: Size,
         skip_cache: bool,
         cwd: Option<PathBuf>,
-        // left here for historical and potential future reasons since we might change the ordering
-        // of the pipeline between threads and end up needing to forward this
-        _floating_pane_coordinates: Option<FloatingPaneCoordinates>,
+        should_focus_plugin: Option<bool>,
+        floating_pane_coordinates: Option<FloatingPaneCoordinates>,
     ) -> Result<()> {
         let get_focused_cwd = || {
             self.active_panes
@@ -1561,6 +1565,8 @@ impl Pty {
             size,
             cwd,
             skip_cache,
+            should_focus_plugin,
+            floating_pane_coordinates,
         ))?;
         Ok(())
     }

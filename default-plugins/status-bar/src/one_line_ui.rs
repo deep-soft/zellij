@@ -1168,6 +1168,7 @@ fn add_keygroup_separator(help: &ModeInfo, max_len: usize) -> Option<LinePart> {
         bits.push(
             Style::new()
                 .fg(separator_color)
+                .on(bg_color)
                 .bold()
                 .paint(format!(" {} ", mode_help_text)),
         );
@@ -1273,6 +1274,8 @@ fn get_keys_and_hints(mi: &ModeInfo) -> Vec<(String, String, Vec<KeyWithModifier
         (s("Toggle Floating"), s("Floating"),
             single_action_key(&km, &[A::ToggleFloatingPanes, TO_NORMAL])),
         (s("Toggle Embed"), s("Embed"), single_action_key(&km, &[A::TogglePaneEmbedOrFloating, TO_NORMAL])),
+        (s("Split Right"), s("Right"), single_action_key(&km, &[A::NewPane(Some(Direction::Right), None, false), TO_NORMAL])),
+        (s("Split Down"), s("Down"), single_action_key(&km, &[A::NewPane(Some(Direction::Down), None, false), TO_NORMAL])),
         (s("Select pane"), s("Select"), to_basemode_key),
     ]} else if mi.mode == IM::Tab {
         // With the default bindings, "Move focus" for tabs is tricky: It binds all the arrow keys
@@ -1328,6 +1331,7 @@ fn get_keys_and_hints(mi: &ModeInfo) -> Vec<(String, String, Vec<KeyWithModifier
         (s("Switch Location"), s("Move"), action_key_group(&km, &[
             &[Action::MovePane(Some(Dir::Left))], &[Action::MovePane(Some(Dir::Down))],
             &[Action::MovePane(Some(Dir::Up))], &[Action::MovePane(Some(Dir::Right))]])),
+        (s("When done"), s("Back"), to_basemode_key),
     ]} else if mi.mode == IM::Scroll { vec![
         (s("Enter search term"), s("Search"),
             action_key(&km, &[A::SwitchToMode(IM::EnterSearch), A::SearchInput(vec![0])])),

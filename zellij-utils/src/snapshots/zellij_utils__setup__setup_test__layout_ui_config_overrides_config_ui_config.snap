@@ -1,6 +1,5 @@
 ---
 source: zellij-utils/src/setup.rs
-assertion_line: 827
 expression: "format!(\"{:#?}\", config)"
 ---
 Config {
@@ -272,6 +271,27 @@ Config {
                 SwitchToMode(
                     Pane,
                 ),
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                TogglePaneInGroup,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                    Shift,
+                },
+            }: [
+                ToggleGroupMarking,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -773,6 +793,27 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                TogglePaneInGroup,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                    Shift,
+                },
+            }: [
+                ToggleGroupMarking,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'q',
                 ),
                 key_modifiers: {
@@ -1249,6 +1290,27 @@ Config {
                 SwitchToMode(
                     Normal,
                 ),
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                TogglePaneInGroup,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                    Shift,
+                },
+            }: [
+                ToggleGroupMarking,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -1845,6 +1907,27 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                TogglePaneInGroup,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                    Shift,
+                },
+            }: [
+                ToggleGroupMarking,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'q',
                 ),
                 key_modifiers: {
@@ -2315,6 +2398,27 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                TogglePaneInGroup,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                    Shift,
+                },
+            }: [
+                ToggleGroupMarking,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'q',
                 ),
                 key_modifiers: {
@@ -2666,6 +2770,27 @@ Config {
                 SwitchToMode(
                     Pane,
                 ),
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                TogglePaneInGroup,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                    Shift,
+                },
+            }: [
+                ToggleGroupMarking,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -3125,6 +3250,27 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                TogglePaneInGroup,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                    Shift,
+                },
+            }: [
+                ToggleGroupMarking,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'q',
                 ),
                 key_modifiers: {
@@ -3474,6 +3620,27 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                TogglePaneInGroup,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                    Shift,
+                },
+            }: [
+                ToggleGroupMarking,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'q',
                 ),
                 key_modifiers: {
@@ -3803,6 +3970,27 @@ Config {
                 SwitchToMode(
                     Pane,
                 ),
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                TogglePaneInGroup,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                    Shift,
+                },
+            }: [
+                ToggleGroupMarking,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -4217,6 +4405,27 @@ Config {
                 SwitchToMode(
                     Pane,
                 ),
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                TogglePaneInGroup,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                    Shift,
+                },
+            }: [
+                ToggleGroupMarking,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -4673,6 +4882,27 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                TogglePaneInGroup,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                    Shift,
+                },
+            }: [
+                ToggleGroupMarking,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'q',
                 ),
                 key_modifiers: {
@@ -4997,6 +5227,27 @@ Config {
                 SwitchToMode(
                     Pane,
                 ),
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                TogglePaneInGroup,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                    Shift,
+                },
+            }: [
+                ToggleGroupMarking,
             ],
             KeyWithModifier {
                 bare_key: Char(
@@ -5540,6 +5791,27 @@ Config {
             ],
             KeyWithModifier {
                 bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                },
+            }: [
+                TogglePaneInGroup,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
+                    'p',
+                ),
+                key_modifiers: {
+                    Alt,
+                    Shift,
+                },
+            }: [
+                ToggleGroupMarking,
+            ],
+            KeyWithModifier {
+                bare_key: Char(
                     'q',
                 ),
                 key_modifiers: {
@@ -5643,6 +5915,7 @@ Config {
         stacked_resize: None,
         show_startup_tips: None,
         show_release_notes: None,
+        advanced_mouse_actions: None,
     },
     themes: {},
     plugins: PluginAliases {

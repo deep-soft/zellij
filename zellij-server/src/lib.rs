@@ -5,6 +5,7 @@ pub mod tab;
 
 mod background_jobs;
 mod logging_pipe;
+mod pane_groups;
 mod plugins;
 mod pty;
 mod pty_writer;
@@ -17,6 +18,7 @@ mod ui;
 
 use background_jobs::{background_jobs_main, BackgroundJob};
 use log::info;
+use nix::sys::stat::{umask, Mode};
 use pty_writer::{pty_writer_main, PtyWriteInstruction};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::{
@@ -25,7 +27,6 @@ use std::{
     thread,
 };
 use zellij_utils::envs;
-use zellij_utils::nix::sys::stat::{umask, Mode};
 use zellij_utils::pane_size::Size;
 
 use wasmtime::{Config as WasmtimeConfig, Engine, Strategy};
@@ -369,6 +370,10 @@ impl SessionMetaData {
                     hide_session_name: new_config.ui.pane_frames.hide_session_name,
                     stacked_resize: new_config.options.stacked_resize.unwrap_or(true),
                     default_editor: new_config.options.scrollback_editor.clone(),
+                    advanced_mouse_actions: new_config
+                        .options
+                        .advanced_mouse_actions
+                        .unwrap_or(true),
                 })
                 .unwrap();
             self.senders
@@ -555,9 +560,8 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
     let _ = thread::Builder::new()
         .name("server_listener".to_string())
         .spawn({
-            use zellij_utils::{
-                interprocess::local_socket::LocalSocketListener, shared::set_permissions,
-            };
+            use interprocess::local_socket::LocalSocketListener;
+            use zellij_utils::shared::set_permissions;
 
             let os_input = os_input.clone();
             let session_data = session_data.clone();

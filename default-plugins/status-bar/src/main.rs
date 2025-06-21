@@ -201,6 +201,7 @@ impl ZellijPlugin for State {
         subscribe(&[
             EventType::ModeUpdate,
             EventType::TabUpdate,
+            EventType::PaneUpdate,
             EventType::CopyToClipboard,
             EventType::InputReceived,
             EventType::SystemClipboardFailure,

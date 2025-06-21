@@ -6,6 +6,7 @@ use crate::plugins::zellij_exports::{wasi_write_object, zellij_exports};
 use crate::plugins::PluginId;
 use highway::{HighwayHash, PortableHash};
 use log::info;
+use prost::Message;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
@@ -16,7 +17,6 @@ use url::Url;
 use wasmtime::{Engine, Instance, Linker, Module, Store};
 use wasmtime_wasi::{preview1::WasiP1Ctx, DirPerms, FilePerms, WasiCtxBuilder};
 use zellij_utils::consts::ZELLIJ_PLUGIN_ARTIFACT_DIR;
-use zellij_utils::prost::Message;
 
 use crate::{
     logging_pipe::LoggingPipe, screen::ScreenInstruction, thread_bus::ThreadSenders,
@@ -529,7 +529,8 @@ impl<'a> PluginLoader<'a> {
         );
         let (_wasm_bytes, cached_path) = self.plugin_bytes_and_cache_path()?;
         let timer = std::time::Instant::now();
-        let module = unsafe { Module::deserialize_file(&self.engine, &cached_path)? };
+        let file_in_cache = std::fs::read(&cached_path)?;
+        let module = unsafe { Module::deserialize(&self.engine, file_in_cache)? };
         log::info!(
             "Loaded plugin '{}' from cache folder at '{}' in {:?}",
             self.plugin_path.display(),
@@ -867,6 +868,7 @@ impl<'a> PluginLoader<'a> {
             default_mode: self.default_mode.clone(),
             subscriptions: Arc::new(Mutex::new(HashSet::new())),
             keybinds: self.keybinds.clone(),
+            intercepting_key_presses: false,
             stdin_pipe,
             stdout_pipe,
         };

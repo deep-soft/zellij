@@ -12,7 +12,7 @@ use zellij_utils::plugin_api::plugin_command::ProtobufPluginCommand;
 use zellij_utils::plugin_api::plugin_ids::{ProtobufPluginIds, ProtobufZellijVersion};
 
 pub use super::ui_components::*;
-pub use zellij_utils::prost::{self, *};
+pub use prost::{self, *};
 
 // Subscription Handling
 
@@ -1183,7 +1183,7 @@ pub fn break_panes_to_new_tab(
     unsafe { host_run_plugin_command() };
 }
 
-/// Create a new tab that includes the specified pane ids
+/// Move the pane ids to the tab with the specified index
 pub fn break_panes_to_tab_with_index(
     pane_ids: &[PaneId],
     tab_index: usize,
@@ -1268,6 +1268,60 @@ pub fn change_floating_panes_coordinates(
     pane_ids_and_coordinates: Vec<(PaneId, FloatingPaneCoordinates)>,
 ) {
     let plugin_command = PluginCommand::ChangeFloatingPanesCoordinates(pane_ids_and_coordinates);
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+pub fn group_and_ungroup_panes(pane_ids_to_group: Vec<PaneId>, pane_ids_to_ungroup: Vec<PaneId>) {
+    let plugin_command =
+        PluginCommand::GroupAndUngroupPanes(pane_ids_to_group, pane_ids_to_ungroup);
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+pub fn highlight_and_unhighlight_panes(
+    pane_ids_to_highlight: Vec<PaneId>,
+    pane_ids_to_unhighlight: Vec<PaneId>,
+) {
+    let plugin_command =
+        PluginCommand::HighlightAndUnhighlightPanes(pane_ids_to_highlight, pane_ids_to_unhighlight);
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+pub fn close_multiple_panes(pane_ids: Vec<PaneId>) {
+    let plugin_command = PluginCommand::CloseMultiplePanes(pane_ids);
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+pub fn float_multiple_panes(pane_ids: Vec<PaneId>) {
+    let plugin_command = PluginCommand::FloatMultiplePanes(pane_ids);
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+pub fn embed_multiple_panes(pane_ids: Vec<PaneId>) {
+    let plugin_command = PluginCommand::EmbedMultiplePanes(pane_ids);
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+pub fn intercept_key_presses() {
+    let plugin_command = PluginCommand::InterceptKeyPresses;
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+pub fn clear_key_presses_intercepts() {
+    let plugin_command = PluginCommand::ClearKeyPressesIntercepts;
     let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
     object_to_stdout(&protobuf_plugin_command.encode_to_vec());
     unsafe { host_run_plugin_command() };

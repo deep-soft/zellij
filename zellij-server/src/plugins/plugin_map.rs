@@ -16,7 +16,7 @@ use wasmtime_wasi::{
 
 use crate::{thread_bus::ThreadSenders, ClientId};
 
-use zellij_utils::async_channel::Sender;
+use async_channel::Sender;
 use zellij_utils::{
     data::EventType,
     data::InputMode,
@@ -50,18 +50,21 @@ impl PluginMap {
     pub fn remove_plugins(
         &mut self,
         pid: PluginId,
-    ) -> Vec<(
-        Arc<Mutex<RunningPlugin>>,
-        Arc<Mutex<Subscriptions>>,
-        HashMap<String, Sender<MessageToWorker>>,
-    )> {
-        let mut removed = vec![];
+    ) -> HashMap<
+        (PluginId, ClientId),
+        (
+            Arc<Mutex<RunningPlugin>>,
+            Arc<Mutex<Subscriptions>>,
+            HashMap<String, Sender<MessageToWorker>>,
+        ),
+    > {
+        let mut removed = HashMap::new();
         let ids_in_plugin_map: Vec<(PluginId, ClientId)> =
             self.plugin_assets.keys().copied().collect();
         for (plugin_id, client_id) in ids_in_plugin_map {
             if pid == plugin_id {
                 if let Some(plugin_asset) = self.plugin_assets.remove(&(plugin_id, client_id)) {
-                    removed.push(plugin_asset);
+                    removed.insert((plugin_id, client_id), plugin_asset);
                 }
             }
         }
@@ -310,6 +313,7 @@ pub struct PluginEnv {
     pub stdin_pipe: Arc<Mutex<VecDeque<u8>>>,
     pub stdout_pipe: Arc<Mutex<VecDeque<u8>>>,
     pub keybinds: Keybinds,
+    pub intercepting_key_presses: bool,
 }
 
 #[derive(Clone)]
@@ -453,5 +457,8 @@ impl RunningPlugin {
     }
     pub fn update_default_shell(&mut self, default_shell: Option<TerminalAction>) {
         self.store.data_mut().default_shell = default_shell;
+    }
+    pub fn intercepting_key_presses(&self) -> bool {
+        self.store.data().intercepting_key_presses
     }
 }

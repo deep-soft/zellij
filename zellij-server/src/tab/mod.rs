@@ -7,6 +7,7 @@ mod layout_applier;
 mod swap_layouts;
 
 use copy_command::CopyCommand;
+use serde;
 use std::env::temp_dir;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -17,10 +18,11 @@ use zellij_utils::data::{
 use zellij_utils::errors::prelude::*;
 use zellij_utils::input::command::RunCommand;
 use zellij_utils::input::mouse::{MouseEvent, MouseEventType};
+use zellij_utils::position::Position;
 use zellij_utils::position::{Column, Line};
-use zellij_utils::{position::Position, serde};
 
 use crate::background_jobs::BackgroundJob;
+use crate::pane_groups::PaneGroups;
 use crate::pty_writer::PtyWriteInstruction;
 use crate::screen::CopyOptions;
 use crate::ui::{loading_indication::LoadingIndication, pane_boundaries_frame::FrameParams};
@@ -45,7 +47,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Instant;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     str,
 };
 use zellij_utils::{
@@ -151,6 +153,9 @@ enum BufferedTabInstruction {
 pub struct MouseEffect {
     pub state_changed: bool,
     pub leave_clipboard_message: bool,
+    pub group_toggle: Option<PaneId>,
+    pub group_add: Option<PaneId>,
+    pub ungroup: bool,
 }
 
 impl MouseEffect {
@@ -158,18 +163,54 @@ impl MouseEffect {
         MouseEffect {
             state_changed: true,
             leave_clipboard_message: false,
+            group_toggle: None,
+            group_add: None,
+            ungroup: false,
         }
     }
     pub fn leave_clipboard_message() -> Self {
         MouseEffect {
             state_changed: false,
             leave_clipboard_message: true,
+            group_toggle: None,
+            group_add: None,
+            ungroup: false,
         }
     }
     pub fn state_changed_and_leave_clipboard_message() -> Self {
         MouseEffect {
             state_changed: true,
             leave_clipboard_message: true,
+            group_toggle: None,
+            group_add: None,
+            ungroup: false,
+        }
+    }
+    pub fn group_toggle(pane_id: PaneId) -> Self {
+        MouseEffect {
+            state_changed: true,
+            leave_clipboard_message: false,
+            group_toggle: Some(pane_id),
+            group_add: None,
+            ungroup: false,
+        }
+    }
+    pub fn group_add(pane_id: PaneId) -> Self {
+        MouseEffect {
+            state_changed: true,
+            leave_clipboard_message: false,
+            group_toggle: None,
+            group_add: Some(pane_id),
+            ungroup: false,
+        }
+    }
+    pub fn ungroup() -> Self {
+        MouseEffect {
+            state_changed: true,
+            leave_clipboard_message: false,
+            group_toggle: None,
+            group_add: None,
+            ungroup: true,
         }
     }
 }
@@ -221,6 +262,10 @@ pub(crate) struct Tab {
     arrow_fonts: bool,
     styled_underlines: bool,
     explicitly_disable_kitty_keyboard_protocol: bool,
+    mouse_hover_pane_id: HashMap<ClientId, PaneId>,
+    current_pane_group: Rc<RefCell<PaneGroups>>,
+    advanced_mouse_actions: bool,
+    currently_marking_pane_group: Rc<RefCell<HashMap<ClientId, bool>>>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -308,6 +353,9 @@ pub trait Pane {
     fn set_active_at(&mut self, instant: Instant);
     fn set_frame(&mut self, frame: bool);
     fn set_content_offset(&mut self, offset: Offset);
+    fn get_content_offset(&self) -> Offset {
+        Offset::default()
+    }
     fn cursor_shape_csi(&self) -> String {
         "\u{1b}[0 q".to_string() // default to non blinking block
     }
@@ -328,8 +376,14 @@ pub trait Pane {
     fn right_boundary_x_coords(&self) -> usize {
         self.x() + self.cols()
     }
+    fn right_boundary_x_content_coords(&self) -> usize {
+        self.get_content_x() + self.get_content_columns()
+    }
     fn bottom_boundary_y_coords(&self) -> usize {
         self.y() + self.rows()
+    }
+    fn bottom_boundary_y_content_coords(&self) -> usize {
+        self.get_content_y() + self.get_content_rows()
     }
     fn is_right_of(&self, other: &dyn Pane) -> bool {
         self.x() > other.x()
@@ -515,7 +569,13 @@ pub trait Pane {
         // No-op by default, only terminal panes support holding
     }
     fn add_red_pane_frame_color_override(&mut self, _error_text: Option<String>);
-    fn clear_pane_frame_color_override(&mut self);
+    fn add_highlight_pane_frame_color_override(
+        &mut self,
+        _text: Option<String>,
+        _client_id: Option<ClientId>,
+    ) {
+    }
+    fn clear_pane_frame_color_override(&mut self, _client_id: Option<ClientId>);
     fn frame_color_override(&self) -> Option<PaletteColor>;
     fn invoked_with(&self) -> &Option<Run>;
     fn set_title(&mut self, title: String);
@@ -616,6 +676,9 @@ impl Tab {
         styled_underlines: bool,
         explicitly_disable_kitty_keyboard_protocol: bool,
         default_editor: Option<PathBuf>,
+        current_pane_group: Rc<RefCell<PaneGroups>>,
+        currently_marking_pane_group: Rc<RefCell<HashMap<ClientId, bool>>>,
+        advanced_mouse_actions: bool,
     ) -> Self {
         let name = if name.is_empty() {
             format!("Tab #{}", index + 1)
@@ -710,6 +773,10 @@ impl Tab {
             styled_underlines,
             explicitly_disable_kitty_keyboard_protocol,
             default_editor,
+            mouse_hover_pane_id: HashMap::new(),
+            current_pane_group,
+            currently_marking_pane_group,
+            advanced_mouse_actions,
         }
     }
 
@@ -724,7 +791,7 @@ impl Tab {
     ) -> Result<()> {
         self.swap_layouts
             .set_base_layout((layout.clone(), floating_panes_layout.clone()));
-        if let Ok(should_show_floating_panes) = LayoutApplier::new(
+        match LayoutApplier::new(
             &self.viewport,
             &self.senders,
             &self.sixel_image_store,
@@ -753,17 +820,25 @@ impl Tab {
             new_plugin_ids,
             client_id,
         ) {
-            #[allow(clippy::if_same_then_else)]
-            if should_show_floating_panes && !self.floating_panes.panes_are_visible() {
-                self.toggle_floating_panes(Some(client_id), None)
-                    .non_fatal();
-            } else if !should_show_floating_panes && self.floating_panes.panes_are_visible() {
-                self.toggle_floating_panes(Some(client_id), None)
-                    .non_fatal();
-            }
-            self.tiled_panes.reapply_pane_frames();
-            self.is_pending = false;
-            self.apply_buffered_instructions().non_fatal();
+            Ok(should_show_floating_panes) => {
+                if should_show_floating_panes && !self.floating_panes.panes_are_visible() {
+                    self.toggle_floating_panes(Some(client_id), None)
+                        .non_fatal();
+                } else if !should_show_floating_panes && self.floating_panes.panes_are_visible() {
+                    self.toggle_floating_panes(Some(client_id), None)
+                        .non_fatal();
+                }
+                self.tiled_panes.reapply_pane_frames();
+                self.is_pending = false;
+                self.apply_buffered_instructions().non_fatal();
+            },
+            Err(e) => {
+                // TODO: this should only happen due to an erroneous layout created by user
+                // configuration that was somehow not caught in our KDL layout parser
+                // we should still be able to properly recover from this with a useful error
+                // message though
+                log::error!("Failed to apply layout: {}", e);
+            },
         }
         Ok(())
     }
@@ -811,6 +886,9 @@ impl Tab {
             .non_fatal();
         }
         self.set_force_render();
+        self.senders
+            .send_to_pty_writer(PtyWriteInstruction::ApplyCachedResizes)
+            .with_context(|| format!("failed to apply cached resizes"))?;
         Ok(())
     }
     fn relayout_tiled_panes(&mut self, search_backwards: bool) -> Result<()> {
@@ -855,6 +933,9 @@ impl Tab {
         // we do this so that the new swap layout has a chance to pass through the constraint system
         self.tiled_panes.resize(display_area);
         self.set_should_clear_display_before_rendering();
+        self.senders
+            .send_to_pty_writer(PtyWriteInstruction::ApplyCachedResizes)
+            .with_context(|| format!("failed to apply cached resizes"))?;
         Ok(())
     }
     pub fn previous_swap_layout(&mut self) -> Result<()> {
@@ -864,9 +945,6 @@ impl Tab {
         } else {
             self.relayout_tiled_panes(search_backwards)?;
         }
-        self.senders
-            .send_to_pty_writer(PtyWriteInstruction::ApplyCachedResizes)
-            .with_context(|| format!("failed to update plugins with mode info"))?;
         Ok(())
     }
     pub fn next_swap_layout(&mut self) -> Result<()> {
@@ -876,9 +954,6 @@ impl Tab {
         } else {
             self.relayout_tiled_panes(search_backwards)?;
         }
-        self.senders
-            .send_to_pty_writer(PtyWriteInstruction::ApplyCachedResizes)
-            .with_context(|| format!("failed to update plugins with mode info"))?;
         Ok(())
     }
     pub fn apply_buffered_instructions(&mut self) -> Result<()> {
@@ -918,6 +993,7 @@ impl Tab {
         // this updates all plugins with the client's input mode
         let mode_infos = self.mode_info.borrow();
         let mut plugin_updates = vec![];
+        let currently_marking_pane_group = self.currently_marking_pane_group.borrow();
         for client_id in self.connected_clients.borrow().iter() {
             let mut mode_info = mode_infos
                 .get(client_id)
@@ -925,6 +1001,8 @@ impl Tab {
                 .clone();
             mode_info.shell = Some(self.default_shell.clone());
             mode_info.editor = self.default_editor.clone();
+            mode_info.currently_marking_pane_group =
+                currently_marking_pane_group.get(client_id).copied();
             plugin_updates.push((None, Some(*client_id), Event::ModeUpdate(mode_info)));
         }
         self.senders
@@ -1026,6 +1104,9 @@ impl Tab {
     pub fn has_no_connected_clients(&self) -> bool {
         self.connected_clients.borrow().is_empty()
     }
+    pub fn pane_id_is_floating(&self, pane_id: &PaneId) -> bool {
+        self.floating_panes.panes_contain(pane_id)
+    }
     pub fn toggle_pane_embed_or_floating(&mut self, client_id: ClientId) -> Result<()> {
         let err_context =
             || format!("failed to toggle embedded/floating pane for client {client_id}");
@@ -1061,7 +1142,11 @@ impl Tab {
         }
         Ok(())
     }
-    pub fn toggle_pane_embed_or_floating_for_pane_id(&mut self, pane_id: PaneId) -> Result<()> {
+    pub fn toggle_pane_embed_or_floating_for_pane_id(
+        &mut self,
+        pane_id: PaneId,
+        client_id: Option<ClientId>,
+    ) -> Result<()> {
         let err_context = || {
             format!(
                 "failed to toggle embedded/floating pane for pane_id {:?}",
@@ -1079,7 +1164,7 @@ impl Tab {
                         format!("failed to find floating pane (ID: {pane_id:?}) to embed",)
                     })
                     .with_context(err_context)?;
-                self.add_tiled_pane(floating_pane_to_embed, pane_id, None)?;
+                self.add_tiled_pane(floating_pane_to_embed, pane_id, client_id)?;
             }
         } else if self.tiled_panes.panes_contain(&pane_id) {
             if self.get_selectable_tiled_panes().count() <= 1 {
@@ -1103,17 +1188,17 @@ impl Tab {
             self.set_force_render();
         } else {
             self.show_floating_panes();
-            match self.floating_panes.last_floating_pane_id() {
-                Some(first_floating_pane_id) => match client_id {
+            match self.floating_panes.last_selectable_floating_pane_id() {
+                Some(last_selectable_floating_pane_id) => match client_id {
                     Some(client_id) => {
                         if !self.floating_panes.active_panes_contain(&client_id) {
                             self.floating_panes
-                                .focus_pane(first_floating_pane_id, client_id);
+                                .focus_pane(last_selectable_floating_pane_id, client_id);
                         }
                     },
                     None => {
                         self.floating_panes
-                            .focus_pane_for_all_clients(first_floating_pane_id);
+                            .focus_pane_for_all_clients(last_selectable_floating_pane_id);
                     },
                 },
                 None => {
@@ -1150,14 +1235,17 @@ impl Tab {
         invoked_with: Option<Run>,
         floating_pane_coordinates: Option<FloatingPaneCoordinates>,
         start_suppressed: bool,
+        should_focus_pane: bool,
         client_id: Option<ClientId>,
     ) -> Result<()> {
         let err_context = || format!("failed to create new pane with id {pid:?}");
-        match should_float {
-            Some(true) => self.show_floating_panes(),
-            Some(false) => self.hide_floating_panes(),
-            None => {},
-        };
+        if should_focus_pane {
+            match should_float {
+                Some(true) => self.show_floating_panes(),
+                Some(false) => self.hide_floating_panes(),
+                None => {},
+            };
+        }
         self.close_down_to_max_terminals()
             .with_context(err_context)?;
         let mut new_pane = match pid {
@@ -1232,10 +1320,26 @@ impl Tab {
             self.suppressed_panes
                 .insert(pid, (is_scrollback_editor, new_pane));
             Ok(())
-        } else if self.floating_panes.panes_are_visible() {
-            self.add_floating_pane(new_pane, pid, floating_pane_coordinates, true)
+        } else if should_focus_pane {
+            if self.floating_panes.panes_are_visible() {
+                self.add_floating_pane(new_pane, pid, floating_pane_coordinates, true)
+            } else {
+                self.add_tiled_pane(new_pane, pid, client_id)
+            }
         } else {
-            self.add_tiled_pane(new_pane, pid, client_id)
+            match should_float {
+                Some(true) => {
+                    self.add_floating_pane(new_pane, pid, floating_pane_coordinates, false)
+                },
+                Some(false) => self.add_tiled_pane(new_pane, pid, client_id),
+                None => {
+                    if self.floating_panes.panes_are_visible() {
+                        self.add_floating_pane(new_pane, pid, floating_pane_coordinates, false)
+                    } else {
+                        self.add_tiled_pane(new_pane, pid, client_id)
+                    }
+                },
+            }
         }
     }
     pub fn replace_active_pane_with_editor_pane(
@@ -2192,14 +2296,21 @@ impl Tab {
             floating_panes_stack,
         );
 
+        let current_pane_group: HashMap<ClientId, Vec<PaneId>> =
+            { self.current_pane_group.borrow().clone_inner() };
         self.tiled_panes
-            .render(output, self.floating_panes.panes_are_visible())
+            .render(
+                output,
+                self.floating_panes.panes_are_visible(),
+                &self.mouse_hover_pane_id,
+                current_pane_group.clone(),
+            )
             .with_context(err_context)?;
         if (self.floating_panes.panes_are_visible() && self.floating_panes.has_active_panes())
             || self.floating_panes.has_pinned_panes()
         {
             self.floating_panes
-                .render(output)
+                .render(output, &self.mouse_hover_pane_id, current_pane_group)
                 .with_context(err_context)?;
         }
 
@@ -2760,6 +2871,8 @@ impl Tab {
                 // is opened
                 self.tiled_panes.move_clients_out_of_pane(id);
             }
+        } else if let Some(pane) = self.floating_panes.get_pane_mut(id) {
+            pane.set_selectable(selectable);
         }
         // we do this here because if there is a non-selectable pane on the edge, we consider it
         // outside the viewport (a ui-pane, eg. the status-bar and tab-bar) and need to adjust for it
@@ -2786,7 +2899,7 @@ impl Tab {
         if self.floating_panes.panes_contain(&id) {
             let _closed_pane = self.floating_panes.remove_pane(id);
             self.floating_panes.move_clients_out_of_pane(id);
-            if !self.floating_panes.has_panes() {
+            if !self.floating_panes.has_selectable_panes() {
                 self.swap_layouts.reset_floating_damage();
                 self.hide_floating_panes();
             }
@@ -2799,7 +2912,7 @@ impl Tab {
                 self.swap_layouts.set_is_floating_damaged();
                 // only relayout if the user is already "in" a layout, otherwise this might be
                 // confusing
-                let _ = self.next_swap_layout();
+                let _ = self.relayout_floating_panes(false);
             }
         } else {
             if self.tiled_panes.fullscreen_is_active() {
@@ -2812,7 +2925,7 @@ impl Tab {
                 self.swap_layouts.set_is_tiled_damaged();
                 // only relayout if the user is already "in" a layout, otherwise this might be
                 // confusing
-                let _ = self.next_swap_layout();
+                let _ = self.relayout_tiled_panes(false);
             }
         };
         let _ = self.senders.send_to_plugin(PluginInstruction::Update(vec![(
@@ -2860,7 +2973,7 @@ impl Tab {
                 self.swap_layouts.set_is_floating_damaged();
                 // only relayout if the user is already "in" a layout, otherwise this might be
                 // confusing
-                let _ = self.next_swap_layout();
+                let _ = self.relayout_floating_panes(false);
             }
             // we do this so that the logical index will not affect ordering in the target tab
             if let Some(closed_pane) = closed_pane.as_mut() {
@@ -2878,7 +2991,7 @@ impl Tab {
                 self.swap_layouts.set_is_tiled_damaged();
                 // only relayout if the user is already "in" a layout, otherwise this might be
                 // confusing
-                let _ = self.next_swap_layout();
+                let _ = self.relayout_tiled_panes(false);
             }
             // we do this so that the logical index will not affect ordering in the target tab
             if let Some(closed_pane) = closed_pane.as_mut() {
@@ -3350,7 +3463,11 @@ impl Tab {
         }
     }
 
-    fn get_pane_id_at(&self, point: &Position, search_selectable: bool) -> Result<Option<PaneId>> {
+    fn get_pane_id_at(
+        &mut self,
+        point: &Position,
+        search_selectable: bool,
+    ) -> Result<Option<PaneId>> {
         let err_context = || format!("failed to get id of pane at position {point:?}");
 
         if self.tiled_panes.fullscreen_is_active()
@@ -3368,15 +3485,50 @@ impl Tab {
                 .with_context(err_context)?;
             return Ok(self.tiled_panes.get_active_pane_id(first_client_id));
         }
+
+        let (stacked_pane_ids_under_flexible_pane, _stacked_pane_ids_over_flexible_pane) = {
+            self.tiled_panes
+                .stacked_pane_ids_under_and_over_flexible_panes()
+                .with_context(err_context)?
+        };
+        let pane_contains_point = |p: &Box<dyn Pane>,
+                                   point: &Position,
+                                   stacked_pane_ids_under_flexible_pane: &HashSet<PaneId>|
+         -> bool {
+            let is_flexible_in_stack =
+                p.current_geom().is_stacked() && !p.current_geom().rows.is_fixed();
+            let is_stacked_under = stacked_pane_ids_under_flexible_pane.contains(&p.pid());
+            let geom_to_compare_against = if is_stacked_under && !self.draw_pane_frames {
+                // these sort of panes are one-liner panes under a flexible pane in a stack when we
+                // don't draw pane frames - because the whole stack's content is offset to allow
+                // room for the boundary between panes, they are actually drawn 1 line above where
+                // they are
+                let mut geom = p.current_geom();
+                geom.y = geom.y.saturating_sub(p.get_content_offset().bottom);
+                geom
+            } else if is_flexible_in_stack && !self.draw_pane_frames {
+                // these sorts of panes are flexible panes inside a stack when we don't draw pane
+                // frames - because the whole stack's content is offset to give room for the
+                // boundary between panes, we need to take this offset into account when figuring
+                // out whether the position is inside them
+                let mut geom = p.current_geom();
+                geom.rows.decrease_inner(p.get_content_offset().bottom);
+                geom
+            } else {
+                p.current_geom()
+            };
+            geom_to_compare_against.contains(point)
+        };
+
         if search_selectable {
             Ok(self
                 .get_selectable_tiled_panes()
-                .find(|(_, p)| p.contains(point))
+                .find(|(_, p)| pane_contains_point(p, point, &stacked_pane_ids_under_flexible_pane))
                 .map(|(&id, _)| id))
         } else {
             Ok(self
                 .get_tiled_panes()
-                .find(|(_, p)| p.contains(point))
+                .find(|(_, p)| pane_contains_point(p, point, &stacked_pane_ids_under_flexible_pane))
                 .map(|(&id, _)| id))
         }
     }
@@ -3403,6 +3555,13 @@ impl Tab {
                 .ok_or_else(|| anyhow!("Failed to find pane at position"))?
                 .pid();
             match event.event_type {
+                MouseEventType::Press if event.alt => {
+                    self.mouse_hover_pane_id.remove(&client_id);
+                    Ok(MouseEffect::group_toggle(pane_id_at_position))
+                },
+                MouseEventType::Motion if event.alt => {
+                    Ok(MouseEffect::group_add(pane_id_at_position))
+                },
                 MouseEventType::Press => {
                     if pane_id_at_position == active_pane_id {
                         self.handle_active_pane_left_mouse_press(event, client_id)
@@ -3417,6 +3576,9 @@ impl Tab {
             self.handle_scrollwheel_up(&event.position, 3, client_id)
         } else if event.wheel_down {
             self.handle_scrollwheel_down(&event.position, 3, client_id)
+        } else if event.right && event.alt {
+            self.mouse_hover_pane_id.remove(&client_id);
+            Ok(MouseEffect::ungroup())
         } else if event.right {
             self.handle_right_click(&event, client_id)
         } else if event.middle {
@@ -3523,10 +3685,9 @@ impl Tab {
         let err_context =
             || format!("failed to handle mouse event {event:?} for client {client_id}");
         if !self.floating_panes.panes_are_visible() {
-            let search_selectable = false;
             if let Ok(Some(pane_id)) = self
                 .floating_panes
-                .get_pinned_pane_id_at(&event.position, search_selectable)
+                .get_pinned_pane_id_at(&event.position, true)
             {
                 // here, the floating panes are not visible, but there is a pinned pane (always
                 // visible) that has been clicked on - so we make the entire surface visible and
@@ -3534,6 +3695,15 @@ impl Tab {
                 self.show_floating_panes();
                 self.floating_panes.focus_pane(pane_id, client_id);
                 return Ok(MouseEffect::state_changed());
+            } else if let Ok(Some(_pane_id)) = self
+                .floating_panes
+                .get_pinned_pane_id_at(&event.position, false)
+            {
+                // here, the floating panes are not visible, but there is a pinned pane (always
+                // visible) that has been clicked on - this pane however is not selectable
+                // (we know this because we passed "false" to get_pinned_pane_id_at)
+                // so we don't do anything
+                return Ok(MouseEffect::default());
             }
         }
         let active_pane_id_before_click = self
@@ -3781,6 +3951,17 @@ impl Tab {
                         .with_context(err_context)?;
                     }
                 }
+                self.mouse_hover_pane_id.remove(&client_id);
+            } else {
+                let pane_id = pane.pid();
+                // if the pane is not selectable, we don't want to create a hover effect over it
+                // we do however want to remove the hover effect from other panes
+                let pane_is_selectable = pane.selectable();
+                if self.advanced_mouse_actions && pane_is_selectable {
+                    self.mouse_hover_pane_id.insert(client_id, pane_id);
+                } else if self.advanced_mouse_actions {
+                    self.mouse_hover_pane_id.remove(&client_id);
+                }
             }
         };
         Ok(MouseEffect::leave_clipboard_message())
@@ -3967,7 +4148,7 @@ impl Tab {
 
         Ok(())
     }
-    pub fn visible(&self, visible: bool) -> Result<()> {
+    pub fn visible(&mut self, visible: bool) -> Result<()> {
         let pids_in_this_tab = self.tiled_panes.pane_ids().filter_map(|p| match p {
             PaneId::Plugin(pid) => Some(pid),
             _ => None,
@@ -3979,6 +4160,9 @@ impl Tab {
         self.senders
             .send_to_plugin(PluginInstruction::Update(plugin_updates))
             .with_context(|| format!("failed to set visibility of tab to {visible}"))?;
+        if !visible {
+            self.mouse_hover_pane_id.clear();
+        }
         Ok(())
     }
 
@@ -4143,7 +4327,12 @@ impl Tab {
             pane.add_red_pane_frame_color_override(error_text);
         }
     }
-    pub fn clear_pane_frame_color_override(&mut self, pane_id: PaneId) {
+    pub fn add_highlight_pane_frame_color_override(
+        &mut self,
+        pane_id: PaneId,
+        error_text: Option<String>,
+        client_id: Option<ClientId>,
+    ) {
         if let Some(pane) = self
             .tiled_panes
             .get_pane_mut(pane_id)
@@ -4155,7 +4344,26 @@ impl Tab {
                     .map(|s_p| &mut s_p.1)
             })
         {
-            pane.clear_pane_frame_color_override();
+            pane.add_highlight_pane_frame_color_override(error_text, client_id);
+        }
+    }
+    pub fn clear_pane_frame_color_override(
+        &mut self,
+        pane_id: PaneId,
+        client_id: Option<ClientId>,
+    ) {
+        if let Some(pane) = self
+            .tiled_panes
+            .get_pane_mut(pane_id)
+            .or_else(|| self.floating_panes.get_pane_mut(pane_id))
+            .or_else(|| {
+                self.suppressed_panes
+                    .values_mut()
+                    .find(|s_p| s_p.1.pid() == pane_id)
+                    .map(|s_p| &mut s_p.1)
+            })
+        {
+            pane.clear_pane_frame_color_override(client_id);
         }
     }
     pub fn update_plugin_loading_stage(&mut self, pid: u32, loading_indication: LoadingIndication) {
@@ -4294,12 +4502,14 @@ impl Tab {
     }
     pub fn pane_infos(&self) -> Vec<PaneInfo> {
         let mut pane_info = vec![];
-        let mut tiled_pane_info = self.tiled_panes.pane_info();
-        let mut floating_pane_info = self.floating_panes.pane_info();
+        let current_pane_group = { self.current_pane_group.borrow().clone_inner() };
+        let mut tiled_pane_info = self.tiled_panes.pane_info(&current_pane_group);
+        let mut floating_pane_info = self.floating_panes.pane_info(&current_pane_group);
         pane_info.append(&mut tiled_pane_info);
         pane_info.append(&mut floating_pane_info);
         for (pane_id, (_is_scrollback_editor, pane)) in self.suppressed_panes.iter() {
-            let mut pane_info_for_suppressed_pane = pane_info_for_pane(pane_id, pane);
+            let mut pane_info_for_suppressed_pane =
+                pane_info_for_pane(pane_id, pane, &current_pane_group);
             pane_info_for_suppressed_pane.is_floating = false;
             pane_info_for_suppressed_pane.is_suppressed = true;
             pane_info_for_suppressed_pane.is_focused = false;
@@ -4328,6 +4538,7 @@ impl Tab {
             pane.set_active_at(Instant::now());
             pane.set_geom(new_pane_geom);
             pane.set_content_offset(Offset::frame(1)); // floating panes always have a frame
+            pane.render_full_viewport(); // to make sure the frame is re-rendered
             resize_pty!(pane, self.os_api, self.senders, self.character_cell_size)
                 .with_context(err_context)?;
             self.floating_panes.add_pane(pane_id, pane);
@@ -4340,7 +4551,7 @@ impl Tab {
             // confusing and not what the user intends
             self.swap_layouts.set_is_floating_damaged(); // we do this so that we won't skip to the
                                                          // next layout
-            self.next_swap_layout()?;
+            self.relayout_floating_panes(false)?;
         }
         Ok(())
     }
@@ -4374,7 +4585,7 @@ impl Tab {
             // confusing and not what the user intends
             self.swap_layouts.set_is_tiled_damaged(); // we do this so that we won't skip to the
                                                       // next layout
-            self.next_swap_layout()?;
+            self.relayout_tiled_panes(false)?;
         }
         Ok(())
     }
@@ -4532,6 +4743,9 @@ impl Tab {
     pub fn update_auto_layout(&mut self, auto_layout: bool) {
         self.auto_layout = auto_layout;
     }
+    pub fn update_advanced_mouse_actions(&mut self, advanced_mouse_actions: bool) {
+        self.advanced_mouse_actions = advanced_mouse_actions;
+    }
     pub fn extract_suppressed_panes(&mut self) -> SuppressedPanes {
         self.suppressed_panes.drain().collect()
     }
@@ -4552,16 +4766,24 @@ impl Tab {
             self.set_force_render();
         }
     }
-    pub fn has_room_for_stack(&self, root_pane_id: PaneId, stack_size: usize) -> bool {
+    pub fn has_room_for_stack(&mut self, root_pane_id: PaneId, stack_size: usize) -> bool {
         if self.floating_panes.panes_contain(&root_pane_id)
             || self.suppressed_panes.contains_key(&root_pane_id)
         {
             log::error!("Root pane of stack cannot be floating or suppressed");
             return false;
         }
-        self.get_pane_with_id(root_pane_id)
-            .map(|p| p.position_and_size().rows.as_usize() >= stack_size + MIN_TERMINAL_HEIGHT)
-            .unwrap_or(false)
+        if self.pane_is_stacked(root_pane_id) {
+            let room_left_in_stack = self
+                .tiled_panes
+                .room_left_in_stack_of_pane_id(&root_pane_id)
+                .unwrap_or(0);
+            stack_size <= room_left_in_stack
+        } else {
+            self.get_pane_with_id(root_pane_id)
+                .map(|p| p.position_and_size().rows.as_usize() >= stack_size + MIN_TERMINAL_HEIGHT)
+                .unwrap_or(false)
+        }
     }
     pub fn set_tiled_panes_damaged(&mut self) {
         self.swap_layouts.set_is_tiled_damaged();
@@ -4572,33 +4794,53 @@ impl Tab {
             return;
         }
         self.swap_layouts.set_is_tiled_damaged(); // TODO: verify we can do all the below first
-
-        // + 1 for the root pane
-        let mut stack_geoms = self
-            .tiled_panes
-            .stack_panes(root_pane_id, panes_to_stack.len() + 1);
-        if stack_geoms.is_empty() {
-            log::error!("Failed to find room for stacked panes");
-            return;
-        }
-        self.tiled_panes
-            .set_geom_for_pane_with_id(&root_pane_id, stack_geoms.remove(0));
-        let mut focused_pane_id_in_stack = None;
-        for mut pane in panes_to_stack.drain(..) {
-            let pane_id = pane.pid();
-            let stack_geom = stack_geoms.remove(0);
-            pane.set_geom(stack_geom);
-            self.tiled_panes.add_pane_with_existing_geom(pane_id, pane);
-            if self.tiled_panes.pane_id_is_focused(&pane_id) {
-                focused_pane_id_in_stack = Some(pane_id);
+        if self.pane_is_stacked(root_pane_id) {
+            if let Some(lowest_pane_id_in_stack) = self
+                .tiled_panes
+                .pane_ids_in_stack_of_pane_id(&root_pane_id)
+                .last()
+            {
+                // we get lowest_pane_id_in_stack so that we can extract the pane below and re-add
+                // it to its own stack - this has the effect of making it the last pane in the
+                // stack so that the rest of the panes will later be added below it - which makes
+                // sense from the perspective of the user
+                if let Some(pane) = self.extract_pane(root_pane_id, true) {
+                    self.tiled_panes
+                        .add_pane_to_stack(&lowest_pane_id_in_stack, pane);
+                }
             }
-        }
-        // if we had a focused pane in the stack, we expand it
-        if let Some(focused_pane_id_in_stack) = focused_pane_id_in_stack {
-            self.tiled_panes
-                .expand_pane_in_stack(focused_pane_id_in_stack);
-        } else if self.tiled_panes.pane_id_is_focused(&root_pane_id) {
+            for pane in panes_to_stack.drain(..) {
+                self.tiled_panes.add_pane_to_stack(&root_pane_id, pane);
+            }
             self.tiled_panes.expand_pane_in_stack(root_pane_id);
+        } else {
+            // + 1 for the root pane
+            let mut stack_geoms = self
+                .tiled_panes
+                .stack_panes(root_pane_id, panes_to_stack.len() + 1);
+            if stack_geoms.is_empty() {
+                log::error!("Failed to find room for stacked panes");
+                return;
+            }
+            self.tiled_panes
+                .set_geom_for_pane_with_id(&root_pane_id, stack_geoms.remove(0));
+            let mut focused_pane_id_in_stack = None;
+            for mut pane in panes_to_stack.drain(..) {
+                let pane_id = pane.pid();
+                let stack_geom = stack_geoms.remove(0);
+                pane.set_geom(stack_geom);
+                self.tiled_panes.add_pane_with_existing_geom(pane_id, pane);
+                if self.tiled_panes.pane_id_is_focused(&pane_id) {
+                    focused_pane_id_in_stack = Some(pane_id);
+                }
+            }
+            // if we had a focused pane in the stack, we expand it
+            if let Some(focused_pane_id_in_stack) = focused_pane_id_in_stack {
+                self.tiled_panes
+                    .expand_pane_in_stack(focused_pane_id_in_stack);
+            } else if self.tiled_panes.pane_id_is_focused(&root_pane_id) {
+                self.tiled_panes.expand_pane_in_stack(root_pane_id);
+            }
         }
     }
     pub fn change_floating_pane_coordinates(
@@ -4666,9 +4908,18 @@ impl Tab {
             (is_scrollback_editor, replaced_pane),
         );
     }
+    fn pane_is_stacked(&self, pane_id: PaneId) -> bool {
+        self.get_pane_with_id(pane_id)
+            .map(|p| p.position_and_size().stacked.is_some())
+            .unwrap_or(false)
+    }
 }
 
-pub fn pane_info_for_pane(pane_id: &PaneId, pane: &Box<dyn Pane>) -> PaneInfo {
+pub fn pane_info_for_pane(
+    pane_id: &PaneId,
+    pane: &Box<dyn Pane>,
+    current_pane_group: &HashMap<ClientId, Vec<PaneId>>,
+) -> PaneInfo {
     let mut pane_info = PaneInfo::default();
     pane_info.pane_x = pane.x();
     pane_info.pane_content_x = pane.get_content_x();
@@ -4684,6 +4935,17 @@ pub fn pane_info_for_pane(pane_id: &PaneId, pane: &Box<dyn Pane>) -> PaneInfo {
     pane_info.exited = pane.exited();
     pane_info.exit_status = pane.exit_status();
     pane_info.is_held = pane.is_held();
+    let index_in_pane_group: BTreeMap<ClientId, usize> = current_pane_group
+        .iter()
+        .filter_map(|(client_id, pane_ids)| {
+            if let Some(position) = pane_ids.iter().position(|p_id| p_id == &pane.pid()) {
+                Some((*client_id, position))
+            } else {
+                None
+            }
+        })
+        .collect();
+    pane_info.index_in_pane_group = index_in_pane_group;
 
     match pane_id {
         PaneId::Terminal(terminal_id) => {

@@ -2,6 +2,7 @@ use crate::input::actions::Action;
 use crate::input::config::ConversionError;
 use crate::input::keybinds::Keybinds;
 use crate::input::layout::{RunPlugin, SplitSize};
+use crate::pane_size::PaneGeom;
 use crate::shared::colors as default_colors;
 use clap::ArgEnum;
 use serde::{Deserialize, Serialize};
@@ -494,6 +495,10 @@ impl KeyWithModifier {
     pub fn is_key_with_super_modifier(&self, key: BareKey) -> bool {
         self.bare_key == key && self.key_modifiers.contains(&KeyModifier::Super)
     }
+    pub fn is_cancel_key(&self) -> bool {
+        // self.bare_key == BareKey::Esc || self.is_key_with_ctrl_modifier(BareKey::Char('c'))
+        self.bare_key == BareKey::Esc
+    }
     #[cfg(not(target_family = "wasm"))]
     pub fn to_termwiz_modifiers(&self) -> Modifiers {
         let mut modifiers = Modifiers::empty();
@@ -933,6 +938,8 @@ pub enum Event {
     FailedToChangeHostFolder(Option<String>), // String -> the error we got when changing
     PastedText(String),
     ConfigWasWrittenToDisk,
+    BeforeClose,
+    InterceptedKeyPress(KeyWithModifier),
 }
 
 #[derive(
@@ -964,6 +971,7 @@ pub enum Permission {
     MessageAndLaunchOtherPlugins,
     Reconfigure,
     FullHdAccess,
+    InterceptInput,
 }
 
 impl PermissionType {
@@ -986,6 +994,7 @@ impl PermissionType {
             },
             PermissionType::Reconfigure => "Change Zellij runtime configuration".to_owned(),
             PermissionType::FullHdAccess => "Full access to the hard-drive".to_owned(),
+            PermissionType::InterceptInput => "Intercept Input (keyboard & mouse)".to_owned(),
         }
     }
 }
@@ -1274,8 +1283,8 @@ pub const DEFAULT_STYLES: Styling = Styling {
     },
     frame_highlight: StyleDeclaration {
         base: PaletteColor::EightBit(default_colors::ORANGE),
-        emphasis_0: PaletteColor::EightBit(default_colors::GREEN),
-        emphasis_1: PaletteColor::EightBit(default_colors::GREEN),
+        emphasis_0: PaletteColor::EightBit(default_colors::MAGENTA),
+        emphasis_1: PaletteColor::EightBit(default_colors::PURPLE),
         emphasis_2: PaletteColor::EightBit(default_colors::GREEN),
         emphasis_3: PaletteColor::EightBit(default_colors::GREEN),
         background: PaletteColor::EightBit(default_colors::GREEN),
@@ -1432,8 +1441,8 @@ impl From<Palette> for Styling {
             },
             frame_highlight: StyleDeclaration {
                 base: palette.orange,
-                emphasis_0: palette.orange,
-                emphasis_1: palette.orange,
+                emphasis_0: palette.magenta,
+                emphasis_1: palette.purple,
                 emphasis_2: palette.orange,
                 emphasis_3: palette.orange,
                 background: Default::default(),
@@ -1508,6 +1517,7 @@ pub struct ModeInfo {
     pub session_name: Option<String>,
     pub editor: Option<PathBuf>,
     pub shell: Option<PathBuf>,
+    pub currently_marking_pane_group: Option<bool>,
 }
 
 impl ModeInfo {
@@ -1733,6 +1743,9 @@ pub struct PaneInfo {
     /// Unselectable panes are often used for UI elements that do not have direct user interaction
     /// (eg. the default `status-bar` or `tab-bar`).
     pub is_selectable: bool,
+    /// Grouped panes (usually through an explicit user action) that are staged for a bulk action
+    /// the index is kept track of in order to preserve the pane group order
+    pub index_in_pane_group: BTreeMap<ClientId, usize>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ClientInfo {
@@ -1763,6 +1776,7 @@ pub struct PluginIds {
     pub plugin_id: u32,
     pub zellij_pid: u32,
     pub initial_cwd: PathBuf,
+    pub client_id: ClientId,
 }
 
 /// Tag used to identify the plugin in layout and config kdl files
@@ -1870,6 +1884,7 @@ pub struct MessageToPlugin {
     /// these will only be used in case we need to launch a new plugin to send this message to,
     /// since none are running
     pub new_plugin_args: Option<NewPluginArgs>,
+    pub floating_pane_coordinates: Option<FloatingPaneCoordinates>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1931,6 +1946,13 @@ impl MessageToPlugin {
     }
     pub fn with_args(mut self, args: BTreeMap<String, String>) -> Self {
         self.message_args = args;
+        self
+    }
+    pub fn with_floating_pane_coordinates(
+        mut self,
+        floating_pane_coordinates: FloatingPaneCoordinates,
+    ) -> Self {
+        self.floating_pane_coordinates = Some(floating_pane_coordinates);
         self
     }
     pub fn new_plugin_instance_should_float(mut self, should_float: bool) -> Self {
@@ -2131,6 +2153,18 @@ impl FloatingPaneCoordinates {
     }
 }
 
+impl From<PaneGeom> for FloatingPaneCoordinates {
+    fn from(pane_geom: PaneGeom) -> Self {
+        FloatingPaneCoordinates {
+            x: Some(SplitSize::Fixed(pane_geom.x)),
+            y: Some(SplitSize::Fixed(pane_geom.y)),
+            width: Some(SplitSize::Fixed(pane_geom.cols.as_usize())),
+            height: Some(SplitSize::Fixed(pane_geom.rows.as_usize())),
+            pinned: Some(pane_geom.is_pinned),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OriginatingPlugin {
     pub plugin_id: u32,
@@ -2307,4 +2341,12 @@ pub enum PluginCommand {
     OpenFileNearPlugin(FileToOpen, Context),
     OpenFileFloatingNearPlugin(FileToOpen, Option<FloatingPaneCoordinates>, Context),
     OpenFileInPlaceOfPlugin(FileToOpen, bool, Context), // bool -> close_plugin_after_replace
+    GroupAndUngroupPanes(Vec<PaneId>, Vec<PaneId>),     // panes to group, panes to ungroup
+    HighlightAndUnhighlightPanes(Vec<PaneId>, Vec<PaneId>), // panes to highlight, panes to
+    // unhighlight
+    CloseMultiplePanes(Vec<PaneId>),
+    FloatMultiplePanes(Vec<PaneId>),
+    EmbedMultiplePanes(Vec<PaneId>),
+    InterceptKeyPresses,
+    ClearKeyPressesIntercepts,
 }
