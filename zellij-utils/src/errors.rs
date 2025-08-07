@@ -213,6 +213,7 @@ pub enum ScreenContext {
     HandlePtyBytes,
     PluginBytes,
     Render,
+    RenderToClients,
     NewPane,
     OpenInPlaceEditor,
     ToggleFloatingPanes,
@@ -347,7 +348,7 @@ pub enum ScreenContext {
     UpdateSessionInfos,
     ReplacePane,
     NewInPlacePluginPane,
-    DumpLayoutToHd,
+    SerializeLayoutForResurrection,
     RenameSession,
     DumpLayoutToPlugin,
     ListClientsMetadata,
@@ -382,8 +383,11 @@ pub enum ScreenContext {
     EmbedMultiplePanes,
     TogglePaneInGroup,
     ToggleGroupMarking,
+    SessionSharingStatusChange,
+    SetMouseSelectionSupport,
     InterceptKeyPresses,
     ClearKeyPressesIntercepts,
+    ReplacePaneWithExistingPane,
 }
 
 /// Stack call representations corresponding to the different types of [`PtyInstruction`]s.
@@ -408,6 +412,7 @@ pub enum PtyContext {
     ListClientsMetadata,
     Reconfigure,
     ListClientsToPlugin,
+    ReportPluginCwd,
     Exit,
 }
 
@@ -447,6 +452,8 @@ pub enum PluginContext {
     FailedToWriteConfigToDisk,
     ListClientsToPlugin,
     ChangePluginHostDir,
+    WebServerStarted,
+    FailedToStartWebServer,
 }
 
 /// Stack call representations corresponding to the different types of [`ClientInstruction`]s.
@@ -470,6 +477,8 @@ pub enum ClientContext {
     CliPipeOutput,
     QueryTerminalSize,
     WriteConfigToDisk,
+    StartWebServer,
+    RenamedSession,
 }
 
 /// Stack call representations corresponding to the different types of [`ServerInstruction`]s.
@@ -498,6 +507,12 @@ pub enum ServerContext {
     ConfigWrittenToDisk,
     FailedToWriteConfigToDisk,
     RebindKeys,
+    StartWebServer,
+    ShareCurrentSession,
+    StopSharingCurrentSession,
+    WebServerStarted,
+    FailedToStartWebServer,
+    SendWebClientsForbidden,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -520,8 +535,10 @@ pub enum BackgroundJobContext {
     RunCommand,
     WebRequest,
     ReportPluginList,
+    ListWebSessions,
     RenderToClients,
     HighlightPanesWithMessage,
+    QueryZellijWebServerStatus,
     Exit,
 }
 

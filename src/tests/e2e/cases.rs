@@ -101,8 +101,16 @@ fn account_for_races_in_snapshot(snapshot: String) -> String {
     // once that happens, we should be able to remove this hack (and adjust the snapshots for the
     // trailing spaces that we had to get rid of here)
     let base_replace = Regex::new(r"Alt <\[\]>  BASE \s*\n").unwrap();
+    let base_replace_tmux_mode_1 = Regex::new(r"Alt \[\|SPACE\|Alt \]  BASE \s*\n").unwrap();
+    let base_replace_tmux_mode_2 = Regex::new(r"Alt \[\|Alt \]\|SPACE  BASE \s*\n").unwrap();
     let eol_arrow_replace = Regex::new(r"\s*\n").unwrap();
     let snapshot = base_replace.replace_all(&snapshot, "\n").to_string();
+    let snapshot = base_replace_tmux_mode_1
+        .replace_all(&snapshot, "\n")
+        .to_string();
+    let snapshot = base_replace_tmux_mode_2
+        .replace_all(&snapshot, "\n")
+        .to_string();
     let snapshot = eol_arrow_replace.replace_all(&snapshot, "\n").to_string();
 
     snapshot
@@ -916,7 +924,9 @@ pub fn resize_pane() {
             name: "Wait for pane to be resized",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
-                if remote_terminal.cursor_position_is(57, 2) && remote_terminal.status_bar_appears()
+                if remote_terminal.cursor_position_is(57, 2)
+                    && remote_terminal.status_bar_appears()
+                    && remote_terminal.snapshot_contains("LOCK")
                 {
                     // pane has been resized
                     step_is_complete = true;
@@ -1043,9 +1053,7 @@ pub fn resize_terminal_window() {
             name: "wait for terminal to be resized and app to be re-rendered",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
-                if remote_terminal.cursor_position_is(53, 2)
-                    && remote_terminal.status_bar_appears()
-                    && remote_terminal.snapshot_contains("Ctrl +")
+                if remote_terminal.cursor_position_is(53, 2) && remote_terminal.ctrl_plus_appears()
                 {
                     // size has been changed
                     step_is_complete = true;
@@ -1135,7 +1143,7 @@ pub fn detach_and_attach_session() {
             name: "Wait for session to be attached",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
-                if remote_terminal.status_bar_appears() && remote_terminal.cursor_position_is(77, 2)
+                if remote_terminal.ctrl_plus_appears() && remote_terminal.cursor_position_is(77, 2)
                 {
                     // we're back inside the session
                     step_is_complete = true;
@@ -1354,7 +1362,9 @@ fn focus_pane_with_mouse() {
             name: "Wait for left pane to be focused",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
-                if remote_terminal.cursor_position_is(3, 2) && remote_terminal.status_bar_appears()
+                if remote_terminal.cursor_position_is(3, 2)
+                    && remote_terminal.status_bar_appears()
+                    && remote_terminal.snapshot_contains("LOCK")
                 {
                     // cursor is in the newly opened second pane
                     step_is_complete = true;
@@ -1405,6 +1415,7 @@ pub fn scrolling_inside_a_pane_with_mouse() {
                     let mut step_is_complete = false;
                     if remote_terminal.cursor_position_is(63, 2)
                         && remote_terminal.status_bar_appears()
+                        && remote_terminal.snapshot_contains("LOCK")
                     {
                         remote_terminal.load_fixture("e2e/scrolling_inside_a_pane");
                         step_is_complete = true;
@@ -2033,7 +2044,10 @@ pub fn toggle_floating_panes() {
             name: "Wait for new pane to appear",
             instruction: |remote_terminal: RemoteTerminal| -> bool {
                 let mut step_is_complete = false;
-                if remote_terminal.cursor_position_is(33, 8) {
+                if remote_terminal.cursor_position_is(33, 8)
+                    && remote_terminal.snapshot_contains("STAGGERED")
+                    && remote_terminal.snapshot_contains("LOCK")
+                {
                     // cursor is in the newly opened second pane
                     step_is_complete = true;
                 }

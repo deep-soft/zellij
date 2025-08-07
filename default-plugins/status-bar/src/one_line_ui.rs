@@ -980,18 +980,19 @@ fn secondary_keybinds(help: &ModeInfo, tab_info: Option<&TabInfo>, max_len: usiz
         }
         if short_line.len <= max_len {
             short_line
-        } else {
+        } else if max_len >= 3 {
             let part = serialize_text(
-                &Text::new(format!(
-                    "{:>width$}",
-                    "...",
-                    width = max_len.saturating_sub(3)
-                ))
-                .color_range(0, ..)
-                .opaque(),
+                &Text::new(format!("{:>width$}", "...", width = max_len))
+                    .color_range(0, ..)
+                    .opaque(),
             );
-            let len = max_len.saturating_sub(3);
+            let len = max_len;
             LinePart { part, len }
+        } else {
+            LinePart {
+                part: "".to_owned(),
+                len: 0,
+            }
         }
     }
 }
@@ -1276,6 +1277,7 @@ fn get_keys_and_hints(mi: &ModeInfo) -> Vec<(String, String, Vec<KeyWithModifier
         (s("Toggle Embed"), s("Embed"), single_action_key(&km, &[A::TogglePaneEmbedOrFloating, TO_NORMAL])),
         (s("Split Right"), s("Right"), single_action_key(&km, &[A::NewPane(Some(Direction::Right), None, false), TO_NORMAL])),
         (s("Split Down"), s("Down"), single_action_key(&km, &[A::NewPane(Some(Direction::Down), None, false), TO_NORMAL])),
+        (s("Stack"), s("Stack"), single_action_key(&km, &[A::NewStackedPane(None, None), TO_NORMAL])),
         (s("Select pane"), s("Select"), to_basemode_key),
     ]} else if mi.mode == IM::Tab {
         // With the default bindings, "Move focus" for tabs is tricky: It binds all the arrow keys
@@ -1295,7 +1297,7 @@ fn get_keys_and_hints(mi: &ModeInfo) -> Vec<(String, String, Vec<KeyWithModifier
         };
 
         vec![
-        (s("New"), s("New"), single_action_key(&km, &[A::NewTab(None, vec![], None, None, None, true), TO_NORMAL])),
+        (s("New"), s("New"), single_action_key(&km, &[A::NewTab(None, vec![], None, None, None, true, None), TO_NORMAL])),
         (s("Change focus"), s("Move"), focus_keys),
         (s("Close"), s("Close"), single_action_key(&km, &[A::CloseTab, TO_NORMAL])),
         (s("Rename"), s("Rename"),
@@ -1368,6 +1370,7 @@ fn get_keys_and_hints(mi: &ModeInfo) -> Vec<(String, String, Vec<KeyWithModifier
     ]} else if mi.mode == IM::Session { vec![
         (s("Detach"), s("Detach"), action_key(&km, &[Action::Detach])),
         (s("Session Manager"), s("Manager"), session_manager_key(&km)),
+        (s("Share"), s("Share"), share_key(&km)),
         (s("Configure"), s("Config"), configuration_key(&km)),
         (s("Plugin Manager"), s("Plugins"), plugin_manager_key(&km)),
         (s("About"), s("About"), about_key(&km)),
@@ -1379,7 +1382,7 @@ fn get_keys_and_hints(mi: &ModeInfo) -> Vec<(String, String, Vec<KeyWithModifier
         (s("Split down"), s("Down"), action_key(&km, &[A::NewPane(Some(Dir::Down), None, false), TO_NORMAL])),
         (s("Split right"), s("Right"), action_key(&km, &[A::NewPane(Some(Dir::Right), None, false), TO_NORMAL])),
         (s("Fullscreen"), s("Fullscreen"), action_key(&km, &[A::ToggleFocusFullscreen, TO_NORMAL])),
-        (s("New tab"), s("New"), action_key(&km, &[A::NewTab(None, vec![], None, None, None, true), TO_NORMAL])),
+        (s("New tab"), s("New"), action_key(&km, &[A::NewTab(None, vec![], None, None, None, true, None), TO_NORMAL])),
         (s("Rename tab"), s("Rename"),
             action_key(&km, &[A::SwitchToMode(IM::RenameTab), A::TabNameInput(vec![0])])),
         (s("Previous Tab"), s("Previous"), action_key(&km, &[A::GoToPreviousTab, TO_NORMAL])),
@@ -1447,6 +1450,25 @@ fn session_manager_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWith
         let has_match = acvec
             .iter()
             .find(|a| a.launches_plugin("session-manager"))
+            .is_some();
+        if has_match {
+            Some(key.clone())
+        } else {
+            None
+        }
+    });
+    if let Some(matching) = matching.take() {
+        vec![matching]
+    } else {
+        vec![]
+    }
+}
+
+fn share_key(keymap: &[(KeyWithModifier, Vec<Action>)]) -> Vec<KeyWithModifier> {
+    let mut matching = keymap.iter().find_map(|(key, acvec)| {
+        let has_match = acvec
+            .iter()
+            .find(|a| a.launches_plugin("zellij:share"))
             .is_some();
         if has_match {
             Some(key.clone())

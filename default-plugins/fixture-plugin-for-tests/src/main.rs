@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+#[allow(unused_imports)]
 use std::io::prelude::*;
 use zellij_tile::prelude::*;
 
@@ -7,6 +8,7 @@ use zellij_tile::prelude::*;
 // it is not (and should not!) be included in the mainline executable
 // it's included here for convenience so that it will be built by the CI
 
+#[allow(dead_code)]
 #[derive(Default)]
 struct State {
     received_events: Vec<Event>,
@@ -92,7 +94,9 @@ impl ZellijPlugin for State {
                     }",
                     );
                 },
-                BareKey::Char('c') if key.has_no_modifiers() => new_tab(),
+                BareKey::Char('c') if key.has_no_modifiers() => {
+                    new_tab(Some("new_tab_name"), Some("/path/to/my/cwd"))
+                },
                 BareKey::Char('d') if key.has_no_modifiers() => go_to_next_tab(),
                 BareKey::Char('e') if key.has_no_modifiers() => go_to_previous_tab(),
                 BareKey::Char('f') if key.has_no_modifiers() => {

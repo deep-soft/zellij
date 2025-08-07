@@ -1,5 +1,4 @@
 use super::sixel::{PixelRect, SixelGrid, SixelImageStore};
-use regex::Regex;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -31,6 +30,7 @@ use zellij_utils::{consts::VERSION, shared::version_number};
 
 use crate::output::{CharacterChunk, OutputBuffer, SixelImageChunk};
 use crate::panes::alacritty_functions::{parse_number, xparse_color};
+use crate::panes::hyperlink_tracker::HyperlinkTracker;
 use crate::panes::link_handler::LinkHandler;
 use crate::panes::search::SearchResult;
 use crate::panes::selection::Selection;
@@ -271,7 +271,7 @@ fn subtract_isize_from_usize(u: usize, i: isize) -> usize {
 macro_rules! dump_screen {
     ($lines:expr) => {{
         let mut is_first = true;
-        let mut buf = "".to_owned();
+        let mut buf = String::with_capacity($lines.iter().map(|l| l.len()).sum());
 
         for line in &$lines {
             if line.is_canonical && !is_first {
@@ -280,8 +280,7 @@ macro_rules! dump_screen {
             let s: String = (&line.columns).into_iter().map(|x| x.character).collect();
             // Replace the spaces at the end of the line. Sometimes, the lines are
             // collected with spaces until the end of the panel.
-            let re = Regex::new("([^ ])[ ]*$").unwrap();
-            buf.push_str(&(re.replace(&s, "${1}")));
+            buf.push_str(&s.trim_end_matches(' '));
             is_first = false;
         }
         buf
@@ -363,6 +362,7 @@ pub struct Grid {
     explicitly_disable_kitty_keyboard_protocol: bool, // has kitty keyboard support been explicitly
     // disabled by user config?
     click: Click,
+    hyperlink_tracker: HyperlinkTracker,
 }
 
 const CLICK_TIME_THRESHOLD: u128 = 400; // Doherty Threshold
@@ -550,6 +550,7 @@ impl Grid {
             supports_kitty_keyboard_protocol: false,
             explicitly_disable_kitty_keyboard_protocol,
             click: Click::default(),
+            hyperlink_tracker: HyperlinkTracker::new(),
         }
     }
     pub fn render_full_viewport(&mut self) {
@@ -1294,6 +1295,13 @@ impl Grid {
     }
     pub fn add_canonical_line(&mut self) {
         let (scroll_region_top, scroll_region_bottom) = self.scroll_region;
+        self.hyperlink_tracker.update(
+            '\n',
+            &self.cursor,
+            &mut self.viewport,
+            &mut self.lines_above,
+            &mut self.link_handler.borrow_mut(),
+        );
         if self.cursor.y == scroll_region_bottom {
             // end of scroll region
             // when we have a scroll region set and we're at its bottom
@@ -1305,7 +1313,7 @@ impl Grid {
                 // the state is corrupted
                 return;
             }
-            if scroll_region_bottom == self.height - 1 && scroll_region_top == 0 {
+            if scroll_region_bottom == self.height.saturating_sub(1) && scroll_region_top == 0 {
                 if self.alternate_screen_state.is_none() {
                     self.transfer_rows_to_lines_above(1);
                 } else {
@@ -1348,6 +1356,13 @@ impl Grid {
         terminal_character: TerminalCharacter,
         should_insert_character: bool,
     ) {
+        self.hyperlink_tracker.update(
+            terminal_character.character,
+            &self.cursor,
+            &mut self.viewport,
+            &mut self.lines_above,
+            &mut self.link_handler.borrow_mut(),
+        );
         // this function assumes the current line has enough room for terminal_character (that its
         // width has been checked beforehand)
         match self.viewport.get_mut(self.cursor.y) {
@@ -1413,14 +1428,14 @@ impl Grid {
         self.move_cursor_forward_until_edge(character_width);
     }
     pub fn get_character_under_cursor(&self) -> Option<TerminalCharacter> {
-        let absolute_x_in_line = self.get_absolute_character_index(self.cursor.x, self.cursor.y);
+        let absolute_x_in_line = self.get_absolute_character_index(self.cursor.x, self.cursor.y)?;
         self.viewport
             .get(self.cursor.y)
             .and_then(|current_line| current_line.columns.get(absolute_x_in_line))
             .cloned()
     }
-    pub fn get_absolute_character_index(&self, x: usize, y: usize) -> usize {
-        self.viewport.get(y).unwrap().absolute_character_index(x)
+    pub fn get_absolute_character_index(&self, x: usize, y: usize) -> Option<usize> {
+        Some(self.viewport.get(y)?.absolute_character_index(x))
     }
     pub fn move_cursor_forward_until_edge(&mut self, count: usize) {
         let count_to_move = std::cmp::min(count, self.width.saturating_sub(self.cursor.x));
@@ -1477,6 +1492,7 @@ impl Grid {
         if self.cursor.y == self.height.saturating_sub(1) {
             if self.alternate_screen_state.is_none() {
                 self.transfer_rows_to_lines_above(1);
+                self.hyperlink_tracker.offset_cursor_lines(1);
             } else {
                 self.viewport.remove(0);
             }
@@ -1529,7 +1545,7 @@ impl Grid {
         if y >= scroll_region_top && y <= scroll_region_bottom {
             self.cursor.y = std::cmp::min(scroll_region_bottom, y + y_offset);
         } else {
-            self.cursor.y = std::cmp::min(self.height - 1, y + y_offset);
+            self.cursor.y = std::cmp::min(self.height.saturating_sub(1), y + y_offset);
         }
         self.pad_lines_until(self.cursor.y, pad_character.clone());
         self.pad_current_line_until(self.cursor.x, pad_character);
@@ -1963,8 +1979,10 @@ impl Grid {
         let position_row = self.viewport.get(position.line.0 as usize)?;
 
         let mut position_start = Position::new(position.line.0 as i32, 0);
-        let mut position_end =
-            Position::new(position.line.0 as i32, position_row.columns.len() as u16);
+        let mut position_end = Position::new(
+            position.line.0 as i32,
+            (position_row.columns.len() + position_row.excess_width()) as u16,
+        );
 
         let mut found_canonical_row_start = position_row.is_canonical;
         while !found_canonical_row_start {
@@ -2422,6 +2440,9 @@ impl Grid {
     }
     pub fn update_arrow_fonts(&mut self, should_support_arrow_fonts: bool) {
         self.arrow_fonts = should_support_arrow_fonts;
+    }
+    pub fn has_selection(&self) -> bool {
+        !self.selection.is_empty()
     }
 }
 
@@ -3781,7 +3802,8 @@ impl Row {
         self.columns.len()
     }
     pub fn word_indices_around_character_index(&self, index: usize) -> Option<(usize, usize)> {
-        let character_at_index = self.columns.get(index)?;
+        let absolute_character_index = self.absolute_character_index(index);
+        let character_at_index = self.columns.get(absolute_character_index)?;
         if is_selection_boundary_character(character_at_index.character) {
             return Some((index, index + 1));
         }
@@ -3789,24 +3811,24 @@ impl Row {
             .columns
             .iter()
             .enumerate()
-            .skip(index)
+            .skip(absolute_character_index)
             .find_map(|(i, t_c)| {
                 if is_selection_boundary_character(t_c.character) {
-                    Some(i)
+                    Some(i + self.excess_width_until(i))
                 } else {
                     None
                 }
             })
-            .unwrap_or_else(|| self.columns.len());
+            .unwrap_or_else(|| self.columns.len() + self.excess_width());
         let start_position = self
             .columns
             .iter()
             .enumerate()
-            .take(index)
+            .take(absolute_character_index)
             .rev()
             .find_map(|(i, t_c)| {
                 if is_selection_boundary_character(t_c.character) {
-                    Some(i + 1)
+                    Some(i + 1 + self.excess_width_until(i))
                 } else {
                     None
                 }
@@ -3825,7 +3847,7 @@ impl Row {
             .rev()
             .find_map(|(i, t_c)| {
                 if is_selection_boundary_character(t_c.character) {
-                    Some(i + 1)
+                    Some(self.absolute_character_index(i + 1))
                 } else {
                     None
                 }
@@ -3838,7 +3860,7 @@ impl Row {
             .enumerate()
             .find_map(|(i, t_c)| {
                 if is_selection_boundary_character(t_c.character) {
-                    Some(i)
+                    Some(self.absolute_character_index(i))
                 } else {
                     None
                 }

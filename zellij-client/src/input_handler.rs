@@ -51,7 +51,7 @@ fn termwiz_mouse_convert(original_event: &mut MouseEvent, event: &TermwizMouseEv
     original_event.ctrl = mods.contains(Modifiers::CTRL);
 }
 
-fn from_termwiz(old_event: &mut MouseEvent, event: TermwizMouseEvent) -> MouseEvent {
+pub fn from_termwiz(old_event: &mut MouseEvent, event: TermwizMouseEvent) -> MouseEvent {
     // We use the state of old_event vs new_event to determine if this
     // event is a Press, Release, or Motion.  This is an unfortunate
     // side effect of the pre-SGR-encoded X10 mouse protocol design in
@@ -125,7 +125,8 @@ impl InputHandler {
         config: Config,
         options: Options,
         send_client_instructions: SenderWithContext<ClientInstruction>,
-        mode: InputMode,
+        mode: InputMode, // TODO: we can probably get rid of this now that we're tracking it on the
+        // server instead
         receive_input_instructions: Receiver<(InputInstruction, ErrorContext)>,
     ) -> Self {
         InputHandler {

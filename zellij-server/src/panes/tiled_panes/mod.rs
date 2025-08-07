@@ -58,7 +58,7 @@ pub struct TiledPanes {
     display_area: Rc<RefCell<Size>>,
     viewport: Rc<RefCell<Viewport>>,
     connected_clients: Rc<RefCell<HashSet<ClientId>>>,
-    connected_clients_in_app: Rc<RefCell<HashSet<ClientId>>>,
+    connected_clients_in_app: Rc<RefCell<HashMap<ClientId, bool>>>, // bool -> is_web_client
     mode_info: Rc<RefCell<HashMap<ClientId, ModeInfo>>>,
     character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
     stacked_resize: Rc<RefCell<bool>>,
@@ -82,7 +82,7 @@ impl TiledPanes {
         display_area: Rc<RefCell<Size>>,
         viewport: Rc<RefCell<Viewport>>,
         connected_clients: Rc<RefCell<HashSet<ClientId>>>,
-        connected_clients_in_app: Rc<RefCell<HashSet<ClientId>>>,
+        connected_clients_in_app: Rc<RefCell<HashMap<ClientId, bool>>>, // bool -> is_web_client
         mode_info: Rc<RefCell<HashMap<ClientId, ModeInfo>>>,
         character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
         stacked_resize: Rc<RefCell<bool>>,
@@ -392,6 +392,72 @@ impl TiledPanes {
                         );
                     },
                 }
+            },
+        }
+    }
+    pub fn add_pane_to_stack_of_active_pane(
+        &mut self,
+        pane_id: PaneId,
+        mut pane: Box<dyn Pane>,
+        client_id: ClientId,
+    ) {
+        let mut pane_grid = TiledPaneGrid::new(
+            &mut self.panes,
+            &self.panes_to_hide,
+            *self.display_area.borrow(),
+            *self.viewport.borrow(),
+        );
+        let Some(active_pane_id) = self.active_panes.get(&client_id) else {
+            log::error!("Could not find active pane id for client_id");
+            return;
+        };
+        let pane_id_is_stacked = pane_grid
+            .get_pane_geom(active_pane_id)
+            .map(|p| p.is_stacked())
+            .unwrap_or(false);
+        if !pane_id_is_stacked {
+            let _ = pane_grid.make_pane_stacked(&active_pane_id);
+        }
+        match pane_grid.make_room_in_stack_of_pane_id_for_pane(active_pane_id) {
+            Ok(new_pane_geom) => {
+                pane.set_geom(new_pane_geom);
+                self.panes.insert(pane_id, pane);
+                self.set_force_render(); // TODO: why do we need this?
+                return;
+            },
+            Err(e) => {
+                log::error!("Failed to add pane to stack: {}", e);
+            },
+        }
+    }
+    pub fn add_pane_to_stack_of_pane_id(
+        &mut self,
+        pane_id: PaneId,
+        mut pane: Box<dyn Pane>,
+        root_pane_id: PaneId,
+    ) {
+        let mut pane_grid = TiledPaneGrid::new(
+            &mut self.panes,
+            &self.panes_to_hide,
+            *self.display_area.borrow(),
+            *self.viewport.borrow(),
+        );
+        let pane_id_is_stacked = pane_grid
+            .get_pane_geom(&root_pane_id)
+            .map(|p| p.is_stacked())
+            .unwrap_or(false);
+        if !pane_id_is_stacked {
+            let _ = pane_grid.make_pane_stacked(&root_pane_id);
+        }
+        match pane_grid.make_room_in_stack_of_pane_id_for_pane(&root_pane_id) {
+            Ok(new_pane_geom) => {
+                pane.set_geom(new_pane_geom);
+                self.panes.insert(pane_id, pane);
+                self.set_force_render(); // TODO: why do we need this?
+                return;
+            },
+            Err(e) => {
+                log::error!("Failed to add pane to stack: {}", e);
             },
         }
     }
@@ -1076,6 +1142,10 @@ impl TiledPanes {
             output
                 .add_character_chunks_to_client(client_id, boundaries_to_render, None)
                 .with_context(err_context)?;
+        }
+        if floating_panes_are_visible {
+            // we do this here so that when they are toggled off, we will make sure to re-render the title
+            self.window_title = None;
         }
         Ok(())
     }

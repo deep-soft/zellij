@@ -9,17 +9,19 @@ mod swap_layouts;
 use copy_command::CopyCommand;
 use serde;
 use std::env::temp_dir;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use uuid::Uuid;
 use zellij_utils::data::{
     Direction, KeyWithModifier, PaneInfo, PermissionStatus, PermissionType, PluginPermission,
-    ResizeStrategy,
+    ResizeStrategy, WebSharing,
 };
 use zellij_utils::errors::prelude::*;
 use zellij_utils::input::command::RunCommand;
 use zellij_utils::input::mouse::{MouseEvent, MouseEventType};
 use zellij_utils::position::Position;
 use zellij_utils::position::{Column, Line};
+use zellij_utils::shared::clean_string_from_control_and_linebreak;
 
 use crate::background_jobs::BackgroundJob;
 use crate::pane_groups::PaneGroups;
@@ -38,7 +40,7 @@ use crate::{
     panes::{FloatingPanes, TiledPanes},
     panes::{LinkHandler, PaneId, PluginPane, TerminalPane},
     plugins::PluginInstruction,
-    pty::{ClientTabIndexOrPaneId, PtyInstruction, VteBytes},
+    pty::{ClientTabIndexOrPaneId, NewPanePlacement, PtyInstruction, VteBytes},
     thread_bus::ThreadSenders,
     ClientId, ServerInstruction,
 };
@@ -262,10 +264,17 @@ pub(crate) struct Tab {
     arrow_fonts: bool,
     styled_underlines: bool,
     explicitly_disable_kitty_keyboard_protocol: bool,
+    web_clients_allowed: bool,
+    web_sharing: WebSharing,
     mouse_hover_pane_id: HashMap<ClientId, PaneId>,
     current_pane_group: Rc<RefCell<PaneGroups>>,
     advanced_mouse_actions: bool,
     currently_marking_pane_group: Rc<RefCell<HashMap<ClientId, bool>>>,
+    connected_clients_in_app: Rc<RefCell<HashMap<ClientId, bool>>>, // bool -> is_web_client
+    // the below are the configured values - the ones that will be set if and when the web server
+    // is brought online
+    web_server_ip: IpAddr,
+    web_server_port: u16,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -342,7 +351,7 @@ pub trait Pane {
     fn pull_left(&mut self, count: usize);
     fn pull_up(&mut self, count: usize);
     fn clear_screen(&mut self);
-    fn dump_screen(&self, _full: bool) -> String {
+    fn dump_screen(&self, _full: bool, _client_id: Option<ClientId>) -> String {
         "".to_owned()
     }
     fn scroll_up(&mut self, count: usize, client_id: ClientId);
@@ -368,8 +377,11 @@ pub trait Pane {
     fn start_selection(&mut self, _start: &Position, _client_id: ClientId) {}
     fn update_selection(&mut self, _position: &Position, _client_id: ClientId) {}
     fn end_selection(&mut self, _end: &Position, _client_id: ClientId) {}
-    fn reset_selection(&mut self) {}
-    fn get_selected_text(&self) -> Option<String> {
+    fn reset_selection(&mut self, _client_id: Option<ClientId>) {}
+    fn supports_mouse_selection(&self) -> bool {
+        true
+    }
+    fn get_selected_text(&self, _client_id: ClientId) -> Option<String> {
         None
     }
 
@@ -613,6 +625,7 @@ pub trait Pane {
     fn toggle_pinned(&mut self) {}
     fn set_pinned(&mut self, _should_be_pinned: bool) {}
     fn reset_logical_position(&mut self) {}
+    fn set_mouse_selection_support(&mut self, _selection_support: bool) {}
 }
 
 #[derive(Clone, Debug)]
@@ -663,7 +676,7 @@ impl Tab {
         default_mode_info: ModeInfo,
         draw_pane_frames: bool,
         auto_layout: bool,
-        connected_clients_in_app: Rc<RefCell<HashSet<ClientId>>>,
+        connected_clients_in_app: Rc<RefCell<HashMap<ClientId, bool>>>, // bool -> is_web_client
         session_is_mirrored: bool,
         client_id: Option<ClientId>,
         copy_options: CopyOptions,
@@ -676,9 +689,13 @@ impl Tab {
         styled_underlines: bool,
         explicitly_disable_kitty_keyboard_protocol: bool,
         default_editor: Option<PathBuf>,
+        web_clients_allowed: bool,
+        web_sharing: WebSharing,
         current_pane_group: Rc<RefCell<PaneGroups>>,
         currently_marking_pane_group: Rc<RefCell<HashMap<ClientId, bool>>>,
         advanced_mouse_actions: bool,
+        web_server_ip: IpAddr,
+        web_server_port: u16,
     ) -> Self {
         let name = if name.is_empty() {
             format!("Tab #{}", index + 1)
@@ -715,7 +732,7 @@ impl Tab {
             display_area.clone(),
             viewport.clone(),
             connected_clients.clone(),
-            connected_clients_in_app,
+            connected_clients_in_app.clone(),
             mode_info.clone(),
             character_cell_size.clone(),
             session_is_mirrored,
@@ -773,10 +790,15 @@ impl Tab {
             styled_underlines,
             explicitly_disable_kitty_keyboard_protocol,
             default_editor,
+            web_clients_allowed,
+            web_sharing,
             mouse_hover_pane_id: HashMap::new(),
             current_pane_group,
             currently_marking_pane_group,
             advanced_mouse_actions,
+            connected_clients_in_app,
+            web_server_ip,
+            web_server_port,
         }
     }
 
@@ -1001,8 +1023,22 @@ impl Tab {
                 .clone();
             mode_info.shell = Some(self.default_shell.clone());
             mode_info.editor = self.default_editor.clone();
+            mode_info.web_clients_allowed = Some(self.web_clients_allowed);
+            mode_info.web_sharing = Some(self.web_sharing);
             mode_info.currently_marking_pane_group =
                 currently_marking_pane_group.get(client_id).copied();
+            mode_info.web_server_ip = Some(self.web_server_ip);
+            mode_info.web_server_port = Some(self.web_server_port);
+            mode_info.is_web_client = self
+                .connected_clients_in_app
+                .borrow()
+                .get(&client_id)
+                .copied();
+            if cfg!(feature = "web_server_capability") {
+                mode_info.web_server_capability = Some(true);
+            } else {
+                mode_info.web_server_capability = Some(false);
+            }
             plugin_updates.push((None, Some(*client_id), Event::ModeUpdate(mode_info)));
         }
         self.senders
@@ -1203,7 +1239,6 @@ impl Tab {
                 },
                 None => {
                     let name = None;
-                    let should_float = true;
                     let client_id_or_tab_index = match client_id {
                         Some(client_id) => ClientTabIndexOrPaneId::ClientId(client_id),
                         None => ClientTabIndexOrPaneId::TabIndex(self.index),
@@ -1211,9 +1246,8 @@ impl Tab {
                     let should_start_suppressed = false;
                     let instruction = PtyInstruction::SpawnTerminal(
                         default_shell,
-                        Some(should_float),
                         name,
-                        None,
+                        NewPanePlacement::Floating(None),
                         should_start_suppressed,
                         client_id_or_tab_index,
                     );
@@ -1231,21 +1265,79 @@ impl Tab {
         &mut self,
         pid: PaneId,
         initial_pane_title: Option<String>,
-        should_float: Option<bool>,
         invoked_with: Option<Run>,
-        floating_pane_coordinates: Option<FloatingPaneCoordinates>,
+        start_suppressed: bool,
+        should_focus_pane: bool,
+        new_pane_placement: NewPanePlacement,
+        client_id: Option<ClientId>,
+    ) -> Result<()> {
+        match new_pane_placement {
+            NewPanePlacement::NoPreference => self.new_no_preference_pane(
+                pid,
+                initial_pane_title,
+                invoked_with,
+                start_suppressed,
+                should_focus_pane,
+                client_id,
+            ),
+            NewPanePlacement::Tiled(None) => self.new_tiled_pane(
+                pid,
+                initial_pane_title,
+                invoked_with,
+                start_suppressed,
+                should_focus_pane,
+                client_id,
+            ),
+            NewPanePlacement::Tiled(Some(direction)) => {
+                if let Some(client_id) = client_id {
+                    if direction == Direction::Left || direction == Direction::Right {
+                        self.vertical_split(pid, initial_pane_title, client_id)?;
+                    } else {
+                        self.horizontal_split(pid, initial_pane_title, client_id)?;
+                    }
+                }
+                Ok(())
+            },
+            NewPanePlacement::Floating(floating_pane_coordinates) => self.new_floating_pane(
+                pid,
+                initial_pane_title,
+                invoked_with,
+                start_suppressed,
+                should_focus_pane,
+                floating_pane_coordinates,
+            ),
+            NewPanePlacement::InPlace {
+                pane_id_to_replace,
+                close_replaced_pane,
+            } => self.new_in_place_pane(
+                pid,
+                initial_pane_title,
+                invoked_with,
+                pane_id_to_replace,
+                close_replaced_pane,
+                client_id,
+            ),
+            NewPanePlacement::Stacked(pane_id_to_stack_under) => self.new_stacked_pane(
+                pid,
+                initial_pane_title,
+                invoked_with,
+                start_suppressed,
+                should_focus_pane,
+                pane_id_to_stack_under,
+                client_id,
+            ),
+        }
+    }
+    pub fn new_no_preference_pane(
+        &mut self,
+        pid: PaneId,
+        initial_pane_title: Option<String>,
+        invoked_with: Option<Run>,
         start_suppressed: bool,
         should_focus_pane: bool,
         client_id: Option<ClientId>,
     ) -> Result<()> {
         let err_context = || format!("failed to create new pane with id {pid:?}");
-        if should_focus_pane {
-            match should_float {
-                Some(true) => self.show_floating_panes(),
-                Some(false) => self.hide_floating_panes(),
-                None => {},
-            };
-        }
         self.close_down_to_max_terminals()
             .with_context(err_context)?;
         let mut new_pane = match pid {
@@ -1322,23 +1414,338 @@ impl Tab {
             Ok(())
         } else if should_focus_pane {
             if self.floating_panes.panes_are_visible() {
-                self.add_floating_pane(new_pane, pid, floating_pane_coordinates, true)
+                self.add_floating_pane(new_pane, pid, None, true)
             } else {
                 self.add_tiled_pane(new_pane, pid, client_id)
             }
         } else {
-            match should_float {
-                Some(true) => {
-                    self.add_floating_pane(new_pane, pid, floating_pane_coordinates, false)
+            if self.floating_panes.panes_are_visible() {
+                self.add_floating_pane(new_pane, pid, None, false)
+            } else {
+                self.add_tiled_pane(new_pane, pid, client_id)
+            }
+        }
+    }
+    pub fn new_tiled_pane(
+        &mut self,
+        pid: PaneId,
+        initial_pane_title: Option<String>,
+        invoked_with: Option<Run>,
+        start_suppressed: bool,
+        should_focus_pane: bool,
+        client_id: Option<ClientId>,
+    ) -> Result<()> {
+        let err_context = || format!("failed to create new pane with id {pid:?}");
+        if should_focus_pane {
+            self.hide_floating_panes();
+        }
+        self.close_down_to_max_terminals()
+            .with_context(err_context)?;
+        let mut new_pane = match pid {
+            PaneId::Terminal(term_pid) => {
+                let next_terminal_position = self.get_next_terminal_position();
+                Box::new(TerminalPane::new(
+                    term_pid,
+                    PaneGeom::default(), // this will be filled out later
+                    self.style,
+                    next_terminal_position,
+                    String::new(),
+                    self.link_handler.clone(),
+                    self.character_cell_size.clone(),
+                    self.sixel_image_store.clone(),
+                    self.terminal_emulator_colors.clone(),
+                    self.terminal_emulator_color_codes.clone(),
+                    initial_pane_title,
+                    invoked_with,
+                    self.debug,
+                    self.arrow_fonts,
+                    self.styled_underlines,
+                    self.explicitly_disable_kitty_keyboard_protocol,
+                )) as Box<dyn Pane>
+            },
+            PaneId::Plugin(plugin_pid) => {
+                Box::new(PluginPane::new(
+                    plugin_pid,
+                    PaneGeom::default(), // this will be filled out later
+                    self.senders
+                        .to_plugin
+                        .as_ref()
+                        .with_context(err_context)?
+                        .clone(),
+                    initial_pane_title.unwrap_or("".to_owned()),
+                    String::new(),
+                    self.sixel_image_store.clone(),
+                    self.terminal_emulator_colors.clone(),
+                    self.terminal_emulator_color_codes.clone(),
+                    self.link_handler.clone(),
+                    self.character_cell_size.clone(),
+                    self.connected_clients.borrow().iter().copied().collect(),
+                    self.style,
+                    invoked_with,
+                    self.debug,
+                    self.arrow_fonts,
+                    self.styled_underlines,
+                )) as Box<dyn Pane>
+            },
+        };
+
+        if start_suppressed {
+            // this pane needs to start in the background (suppressed), only accessible if a plugin takes it out
+            // of there in one way or another
+            // we need to do some bookkeeping for this pane, namely setting its geom and
+            // content_offset so that things will appear properly in the terminal - we set it to
+            // the default geom of the first floating pane - this is just in order to give it some
+            // reasonable size, when it is shown - if needed - it will be given the proper geom as if it were
+            // resized
+            let viewport = { self.viewport.borrow().clone() };
+            let new_pane_geom = half_size_middle_geom(&viewport, 0);
+            new_pane.set_active_at(Instant::now());
+            new_pane.set_geom(new_pane_geom);
+            new_pane.set_content_offset(Offset::frame(1));
+            resize_pty!(
+                new_pane,
+                self.os_api,
+                self.senders,
+                self.character_cell_size
+            )
+            .with_context(err_context)?;
+            let is_scrollback_editor = false;
+            self.suppressed_panes
+                .insert(pid, (is_scrollback_editor, new_pane));
+            Ok(())
+        } else {
+            self.add_tiled_pane(new_pane, pid, client_id)
+        }
+    }
+    pub fn new_floating_pane(
+        &mut self,
+        pid: PaneId,
+        initial_pane_title: Option<String>,
+        invoked_with: Option<Run>,
+        start_suppressed: bool,
+        should_focus_pane: bool,
+        floating_pane_coordinates: Option<FloatingPaneCoordinates>,
+    ) -> Result<()> {
+        let err_context = || format!("failed to create new pane with id {pid:?}");
+        if should_focus_pane {
+            self.show_floating_panes();
+        }
+        self.close_down_to_max_terminals()
+            .with_context(err_context)?;
+        let mut new_pane = match pid {
+            PaneId::Terminal(term_pid) => {
+                let next_terminal_position = self.get_next_terminal_position();
+                Box::new(TerminalPane::new(
+                    term_pid,
+                    PaneGeom::default(), // this will be filled out later
+                    self.style,
+                    next_terminal_position,
+                    String::new(),
+                    self.link_handler.clone(),
+                    self.character_cell_size.clone(),
+                    self.sixel_image_store.clone(),
+                    self.terminal_emulator_colors.clone(),
+                    self.terminal_emulator_color_codes.clone(),
+                    initial_pane_title,
+                    invoked_with,
+                    self.debug,
+                    self.arrow_fonts,
+                    self.styled_underlines,
+                    self.explicitly_disable_kitty_keyboard_protocol,
+                )) as Box<dyn Pane>
+            },
+            PaneId::Plugin(plugin_pid) => {
+                Box::new(PluginPane::new(
+                    plugin_pid,
+                    PaneGeom::default(), // this will be filled out later
+                    self.senders
+                        .to_plugin
+                        .as_ref()
+                        .with_context(err_context)?
+                        .clone(),
+                    initial_pane_title.unwrap_or("".to_owned()),
+                    String::new(),
+                    self.sixel_image_store.clone(),
+                    self.terminal_emulator_colors.clone(),
+                    self.terminal_emulator_color_codes.clone(),
+                    self.link_handler.clone(),
+                    self.character_cell_size.clone(),
+                    self.connected_clients.borrow().iter().copied().collect(),
+                    self.style,
+                    invoked_with,
+                    self.debug,
+                    self.arrow_fonts,
+                    self.styled_underlines,
+                )) as Box<dyn Pane>
+            },
+        };
+
+        if start_suppressed {
+            // this pane needs to start in the background (suppressed), only accessible if a plugin takes it out
+            // of there in one way or another
+            // we need to do some bookkeeping for this pane, namely setting its geom and
+            // content_offset so that things will appear properly in the terminal - we set it to
+            // the default geom of the first floating pane - this is just in order to give it some
+            // reasonable size, when it is shown - if needed - it will be given the proper geom as if it were
+            // resized
+            let viewport = { self.viewport.borrow().clone() };
+            let new_pane_geom = half_size_middle_geom(&viewport, 0);
+            new_pane.set_active_at(Instant::now());
+            new_pane.set_geom(new_pane_geom);
+            new_pane.set_content_offset(Offset::frame(1));
+            resize_pty!(
+                new_pane,
+                self.os_api,
+                self.senders,
+                self.character_cell_size
+            )
+            .with_context(err_context)?;
+            let is_scrollback_editor = false;
+            self.suppressed_panes
+                .insert(pid, (is_scrollback_editor, new_pane));
+            Ok(())
+        } else {
+            self.add_floating_pane(new_pane, pid, floating_pane_coordinates, should_focus_pane)
+        }
+    }
+    pub fn new_in_place_pane(
+        &mut self,
+        pid: PaneId,
+        initial_pane_title: Option<String>,
+        invoked_with: Option<Run>,
+        pane_id_to_replace: Option<PaneId>,
+        close_replaced_pane: bool,
+        client_id: Option<ClientId>,
+    ) -> Result<()> {
+        match (pane_id_to_replace, client_id) {
+            (Some(pane_id_to_replace), _) => {
+                self.suppress_pane_and_replace_with_pid(
+                    pane_id_to_replace,
+                    pid,
+                    close_replaced_pane,
+                    invoked_with,
+                )?;
+            },
+            (None, Some(client_id)) => match self.get_active_pane_id(client_id) {
+                Some(active_pane_id) => {
+                    self.suppress_pane_and_replace_with_pid(
+                        active_pane_id,
+                        pid,
+                        close_replaced_pane,
+                        invoked_with,
+                    )?;
                 },
-                Some(false) => self.add_tiled_pane(new_pane, pid, client_id),
                 None => {
-                    if self.floating_panes.panes_are_visible() {
-                        self.add_floating_pane(new_pane, pid, floating_pane_coordinates, false)
-                    } else {
-                        self.add_tiled_pane(new_pane, pid, client_id)
-                    }
+                    log::error!("Cannot find active pane");
                 },
+            },
+            _ => {
+                log::error!("Must have pane id to replace or client id to start pane in place>");
+            },
+        }
+        if let Some(initial_pane_title) = initial_pane_title {
+            let _ = self.rename_pane(initial_pane_title.as_bytes().to_vec(), pid);
+        }
+        Ok(())
+    }
+    pub fn new_stacked_pane(
+        &mut self,
+        pid: PaneId,
+        initial_pane_title: Option<String>,
+        invoked_with: Option<Run>,
+        start_suppressed: bool,
+        should_focus_pane: bool,
+        pane_id_to_stack_under: Option<PaneId>,
+        client_id: Option<ClientId>,
+    ) -> Result<()> {
+        let err_context = || format!("failed to create new pane with id {pid:?}");
+        if should_focus_pane {
+            self.hide_floating_panes();
+        }
+        self.close_down_to_max_terminals()
+            .with_context(err_context)?;
+        let mut new_pane = match pid {
+            PaneId::Terminal(term_pid) => {
+                let next_terminal_position = self.get_next_terminal_position();
+                Box::new(TerminalPane::new(
+                    term_pid,
+                    PaneGeom::default(), // this will be filled out later
+                    self.style,
+                    next_terminal_position,
+                    String::new(),
+                    self.link_handler.clone(),
+                    self.character_cell_size.clone(),
+                    self.sixel_image_store.clone(),
+                    self.terminal_emulator_colors.clone(),
+                    self.terminal_emulator_color_codes.clone(),
+                    initial_pane_title,
+                    invoked_with,
+                    self.debug,
+                    self.arrow_fonts,
+                    self.styled_underlines,
+                    self.explicitly_disable_kitty_keyboard_protocol,
+                )) as Box<dyn Pane>
+            },
+            PaneId::Plugin(plugin_pid) => {
+                Box::new(PluginPane::new(
+                    plugin_pid,
+                    PaneGeom::default(), // this will be filled out later
+                    self.senders
+                        .to_plugin
+                        .as_ref()
+                        .with_context(err_context)?
+                        .clone(),
+                    initial_pane_title.unwrap_or("".to_owned()),
+                    String::new(),
+                    self.sixel_image_store.clone(),
+                    self.terminal_emulator_colors.clone(),
+                    self.terminal_emulator_color_codes.clone(),
+                    self.link_handler.clone(),
+                    self.character_cell_size.clone(),
+                    self.connected_clients.borrow().iter().copied().collect(),
+                    self.style,
+                    invoked_with,
+                    self.debug,
+                    self.arrow_fonts,
+                    self.styled_underlines,
+                )) as Box<dyn Pane>
+            },
+        };
+
+        if start_suppressed {
+            // this pane needs to start in the background (suppressed), only accessible if a plugin takes it out
+            // of there in one way or another
+            // we need to do some bookkeeping for this pane, namely setting its geom and
+            // content_offset so that things will appear properly in the terminal - we set it to
+            // the default geom of the first floating pane - this is just in order to give it some
+            // reasonable size, when it is shown - if needed - it will be given the proper geom as if it were
+            // resized
+            let viewport = { self.viewport.borrow().clone() };
+            let new_pane_geom = half_size_middle_geom(&viewport, 0);
+            new_pane.set_active_at(Instant::now());
+            new_pane.set_geom(new_pane_geom);
+            new_pane.set_content_offset(Offset::frame(1));
+            resize_pty!(
+                new_pane,
+                self.os_api,
+                self.senders,
+                self.character_cell_size
+            )
+            .with_context(err_context)?;
+            let is_scrollback_editor = false;
+            self.suppressed_panes
+                .insert(pid, (is_scrollback_editor, new_pane));
+            Ok(())
+        } else {
+            if let Some(pane_id_to_stack_under) = pane_id_to_stack_under {
+                // TODO: also focus pane if should_focus_pane? in cases where we did this from the CLI in an unfocused
+                // pane...
+                self.add_stacked_pane_to_pane_id(new_pane, pid, pane_id_to_stack_under)
+            } else if let Some(client_id) = client_id {
+                self.add_stacked_pane_to_active_pane(new_pane, pid, client_id)
+            } else {
+                log::error!("Must have client id or pane id to stack pane");
+                return Ok(());
             }
         }
     }
@@ -1581,6 +1988,30 @@ impl Tab {
             },
         }
         Ok(())
+    }
+    pub fn close_pane_and_replace_with_other_pane(
+        &mut self,
+        pane_id_to_replace: PaneId,
+        pane_to_replace_with: Box<dyn Pane>,
+    ) {
+        let mut replaced_pane = if self.floating_panes.panes_contain(&pane_id_to_replace) {
+            self.floating_panes
+                .replace_pane(pane_id_to_replace, pane_to_replace_with)
+                .ok()
+        } else {
+            self.tiled_panes
+                .replace_pane(pane_id_to_replace, pane_to_replace_with)
+        };
+        if let Some(replaced_pane) = replaced_pane.take() {
+            let pane_id = replaced_pane.pid();
+            let _ = self.senders.send_to_pty(PtyInstruction::ClosePane(pane_id));
+            let _ = self.senders.send_to_plugin(PluginInstruction::Update(vec![(
+                None,
+                None,
+                Event::PaneClosed(pane_id.into()),
+            )]));
+            drop(replaced_pane);
+        }
     }
     pub fn horizontal_split(
         &mut self,
@@ -2882,6 +3313,11 @@ impl Tab {
             self.draw_pane_frames,
         );
     }
+    pub fn set_mouse_selection_support(&mut self, pane_id: PaneId, selection_support: bool) {
+        if let Some(pane) = self.get_pane_with_id_mut(pane_id) {
+            pane.set_mouse_selection_support(selection_support);
+        }
+    }
     pub fn close_pane(&mut self, id: PaneId, ignore_suppressed_panes: bool) {
         // we need to ignore suppressed panes when we toggle a pane to be floating/embedded(tiled)
         // this is because in that case, while we do use this logic, we're not actually closing the
@@ -3122,7 +3558,7 @@ impl Tab {
             || format!("failed to dump active terminal screen for client {client_id}");
 
         if let Some(active_pane) = self.get_active_pane_or_floating_pane_mut(client_id) {
-            let dump = active_pane.dump_screen(full);
+            let dump = active_pane.dump_screen(full, Some(client_id));
             self.os_api
                 .write_to_file(dump, file)
                 .with_context(err_context)?;
@@ -3136,7 +3572,7 @@ impl Tab {
         full: bool,
     ) -> Result<()> {
         if let Some(pane) = self.get_pane_with_id(pane_id) {
-            let dump = pane.dump_screen(full);
+            let dump = pane.dump_screen(full, None);
             self.os_api.write_to_file(dump, file).non_fatal()
         }
         Ok(())
@@ -3664,10 +4100,10 @@ impl Tab {
                 // start selection for copy/paste
                 let mut leave_clipboard_message = false;
                 pane_at_position.start_selection(&relative_position, client_id);
-                if pane_at_position.get_selected_text().is_some() {
+                if pane_at_position.get_selected_text(client_id).is_some() {
                     leave_clipboard_message = true;
                 }
-                if let PaneId::Terminal(_) = pane_at_position.pid() {
+                if pane_at_position.supports_mouse_selection() {
                     self.selecting_with_mouse_in_pane = Some(pane_at_position.pid());
                 }
                 if leave_clipboard_message {
@@ -3818,9 +4254,9 @@ impl Tab {
             } else {
                 let relative_position = pane_with_selection.relative_position(&event.position);
                 pane_with_selection.end_selection(&relative_position, client_id);
-                if let PaneId::Terminal(_) = pane_with_selection.pid() {
+                if pane_with_selection.supports_mouse_selection() {
                     if copy_on_release {
-                        let selected_text = pane_with_selection.get_selected_text();
+                        let selected_text = pane_with_selection.get_selected_text(client_id);
 
                         if let Some(selected_text) = selected_text {
                             leave_clipboard_message = true;
@@ -3837,7 +4273,17 @@ impl Tab {
             self.floating_panes
                 .stop_moving_pane_with_mouse(event.position);
         } else {
-            self.write_mouse_event_to_active_pane(event, client_id)?;
+            let active_pane_id = self
+                .get_active_pane_id(client_id)
+                .ok_or(anyhow!("Failed to find pane at position"))?;
+            let pane_id_at_position = self
+                .get_pane_at(&event.position, false)
+                .with_context(err_context)?
+                .ok_or_else(|| anyhow!("Failed to find pane at position"))?
+                .pid();
+            if active_pane_id == pane_id_at_position {
+                self.write_mouse_event_to_active_pane(event, client_id)?;
+            }
         }
         if leave_clipboard_message {
             Ok(MouseEffect::leave_clipboard_message())
@@ -4087,7 +4533,7 @@ impl Tab {
     pub fn copy_selection(&self, client_id: ClientId) -> Result<()> {
         let selected_text = self
             .get_active_pane(client_id)
-            .and_then(|p| p.get_selected_text());
+            .and_then(|p| p.get_selected_text(client_id));
         if let Some(selected_text) = selected_text {
             self.write_selection_to_clipboard(&selected_text)
                 .with_context(|| {
@@ -4169,21 +4615,19 @@ impl Tab {
     pub fn update_active_pane_name(&mut self, buf: Vec<u8>, client_id: ClientId) -> Result<()> {
         let err_context =
             || format!("failed to update name of active pane to '{buf:?}' for client {client_id}");
-
-        // Only allow printable unicode, delete and backspace keys.
-        let is_updatable = buf
-            .iter()
-            .all(|u| matches!(u, 0x20..=0x7E | 0xA0..=0xFF | 0x08 | 0x7F));
-        if is_updatable {
-            let s = str::from_utf8(&buf).with_context(err_context)?;
-            self.get_active_pane_mut(client_id)
-                .with_context(|| format!("no active pane found for client {client_id}"))
-                .map(|active_pane| {
-                    active_pane.update_name(s);
-                })?;
-        } else {
-            log::error!("Failed to update pane name due to unprintable characters");
-        }
+        let s = str::from_utf8(&buf).with_context(err_context)?;
+        self.get_active_pane_mut(client_id)
+            .with_context(|| format!("no active pane found for client {client_id}"))
+            .map(|active_pane| {
+                let to_update = match s {
+                    "\u{007F}" | "\u{0008}" => {
+                        // delete and backspace keys
+                        s
+                    },
+                    _ => &clean_string_from_control_and_linebreak(s),
+                };
+                active_pane.update_name(&to_update);
+            })?;
         Ok(())
     }
 
@@ -4255,6 +4699,9 @@ impl Tab {
     pub fn update_search_term(&mut self, buf: Vec<u8>, client_id: ClientId) -> Result<()> {
         if let Some(active_pane) = self.get_active_pane_or_floating_pane_mut(client_id) {
             // It only allows terminating char(\0), printable unicode, delete and backspace keys.
+            // TODO: we should really remove this limitation to allow searching for emojis and
+            // other wide chars - currently the search mechanism itself ignores wide chars, so we
+            // should first fix that before removing this condition
             let is_updatable = buf
                 .iter()
                 .all(|u| matches!(u, 0x00 | 0x20..=0x7E | 0x08 | 0x7F));
@@ -4589,6 +5036,38 @@ impl Tab {
         }
         Ok(())
     }
+    pub fn add_stacked_pane_to_pane_id(
+        &mut self,
+        pane: Box<dyn Pane>,
+        pane_id: PaneId,
+        root_pane_id: PaneId,
+    ) -> Result<()> {
+        if self.tiled_panes.fullscreen_is_active() {
+            self.tiled_panes.unset_fullscreen();
+        }
+        self.tiled_panes
+            .add_pane_to_stack_of_pane_id(pane_id, pane, root_pane_id);
+        self.set_should_clear_display_before_rendering();
+        self.tiled_panes.expand_pane_in_stack(pane_id); // so that it will get focused by all
+                                                        // clients
+        self.swap_layouts.set_is_tiled_damaged();
+        Ok(())
+    }
+    pub fn add_stacked_pane_to_active_pane(
+        &mut self,
+        pane: Box<dyn Pane>,
+        pane_id: PaneId,
+        client_id: ClientId,
+    ) -> Result<()> {
+        if self.tiled_panes.fullscreen_is_active() {
+            self.tiled_panes.unset_fullscreen();
+        }
+        self.tiled_panes
+            .add_pane_to_stack_of_active_pane(pane_id, pane, client_id);
+        self.tiled_panes.focus_pane(pane_id, client_id);
+        self.swap_layouts.set_is_tiled_damaged();
+        Ok(())
+    }
     pub fn request_plugin_permissions(&mut self, pid: u32, permissions: Option<PluginPermission>) {
         let mut should_focus_pane = false;
         if let Some(plugin_pane) = self
@@ -4746,6 +5225,13 @@ impl Tab {
     pub fn update_advanced_mouse_actions(&mut self, advanced_mouse_actions: bool) {
         self.advanced_mouse_actions = advanced_mouse_actions;
     }
+    pub fn update_web_sharing(&mut self, web_sharing: WebSharing) {
+        let old_value = self.web_sharing;
+        self.web_sharing = web_sharing;
+        if old_value != self.web_sharing {
+            let _ = self.update_input_modes();
+        }
+    }
     pub fn extract_suppressed_panes(&mut self) -> SuppressedPanes {
         self.suppressed_panes.drain().collect()
     }
@@ -4795,24 +5281,9 @@ impl Tab {
         }
         self.swap_layouts.set_is_tiled_damaged(); // TODO: verify we can do all the below first
         if self.pane_is_stacked(root_pane_id) {
-            if let Some(lowest_pane_id_in_stack) = self
-                .tiled_panes
-                .pane_ids_in_stack_of_pane_id(&root_pane_id)
-                .last()
-            {
-                // we get lowest_pane_id_in_stack so that we can extract the pane below and re-add
-                // it to its own stack - this has the effect of making it the last pane in the
-                // stack so that the rest of the panes will later be added below it - which makes
-                // sense from the perspective of the user
-                if let Some(pane) = self.extract_pane(root_pane_id, true) {
-                    self.tiled_panes
-                        .add_pane_to_stack(&lowest_pane_id_in_stack, pane);
-                }
-            }
             for pane in panes_to_stack.drain(..) {
                 self.tiled_panes.add_pane_to_stack(&root_pane_id, pane);
             }
-            self.tiled_panes.expand_pane_in_stack(root_pane_id);
         } else {
             // + 1 for the root pane
             let mut stack_geoms = self
@@ -4871,6 +5342,9 @@ impl Tab {
     }
     pub fn get_display_area(&self) -> Size {
         self.display_area.borrow().clone()
+    }
+    pub fn get_client_input_mode(&self, client_id: ClientId) -> Option<InputMode> {
+        self.mode_info.borrow().get(&client_id).map(|m| m.mode)
     }
     fn new_scrollback_editor_pane(&self, pid: u32) -> TerminalPane {
         let next_terminal_position = self.get_next_terminal_position();

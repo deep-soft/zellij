@@ -315,7 +315,7 @@ impl TryFrom<ProtobufAction> for Action {
                     Some(_) => Err("NewTab should not have a payload"),
                     None => {
                         // we do not serialize the layouts of this action
-                        Ok(Action::NewTab(None, vec![], None, None, None, true))
+                        Ok(Action::NewTab(None, vec![], None, None, None, true, None))
                     },
                 }
             },
@@ -719,6 +719,10 @@ impl TryFrom<ProtobufAction> for Action {
                     pane_title: None,
                     plugin_id: None,
                 }),
+            },
+            Some(ProtobufActionName::NewStackedPane) => match protobuf_action.optional_payload {
+                Some(_) => Err("NewStackedPane should not have a payload"),
+                None => Ok(Action::NewStackedPane(None, None)),
             },
             _ => Err("Unknown Action"),
         }
@@ -1252,6 +1256,10 @@ impl TryFrom<Action> for ProtobufAction {
             }),
             Action::ToggleGroupMarking { .. } => Ok(ProtobufAction {
                 name: ProtobufActionName::ToggleGroupMarking as i32,
+                optional_payload: None,
+            }),
+            Action::NewStackedPane(..) => Ok(ProtobufAction {
+                name: ProtobufActionName::NewStackedPane as i32,
                 optional_payload: None,
             }),
             Action::NoOp

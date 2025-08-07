@@ -27,6 +27,7 @@ use zellij_utils::{
     data::{
         ClientInfo, Event, EventType, FloatingPaneCoordinates, InputMode, MessageToPlugin,
         PermissionStatus, PermissionType, PipeMessage, PipeSource, PluginCapabilities,
+        WebServerStatus,
     },
     errors::{prelude::*, ContextType, PluginContext},
     input::{
@@ -53,9 +54,10 @@ pub enum PluginInstruction {
         Option<PaneId>, // pane id to replace if this is to be opened "in-place"
         ClientId,
         Size,
-        Option<PathBuf>, // cwd
-        bool,            // skip cache
-        Option<bool>,    // should focus plugin
+        Option<PathBuf>,  // cwd
+        Option<PluginId>, // the focused plugin id if relevant
+        bool,             // skip cache
+        Option<bool>,     // should focus plugin
         Option<FloatingPaneCoordinates>,
     ),
     LoadBackgroundPlugin(RunPluginOrAlias, ClientId),
@@ -77,9 +79,9 @@ pub enum PluginInstruction {
         Option<TerminalAction>,
         Option<TiledPaneLayout>,
         Vec<FloatingPaneLayout>,
-        usize, // tab_index
-        bool,  // should change focus to new tab
-        ClientId,
+        usize,            // tab_index
+        bool,             // should change focus to new tab
+        (ClientId, bool), // bool -> is_web_client
     ),
     ApplyCachedEvents {
         plugin_ids: Vec<PluginId>,
@@ -162,6 +164,8 @@ pub enum PluginInstruction {
     WatchFilesystem,
     ListClientsToPlugin(SessionLayoutMetadata, PluginId, ClientId),
     ChangePluginHostDir(PathBuf, PluginId, ClientId),
+    WebServerStarted(String), // String -> the base url of the web server
+    FailedToStartWebServer(String),
     Exit,
 }
 
@@ -209,6 +213,8 @@ impl From<&PluginInstruction> for PluginContext {
             },
             PluginInstruction::ListClientsToPlugin(..) => PluginContext::ListClientsToPlugin,
             PluginInstruction::ChangePluginHostDir(..) => PluginContext::ChangePluginHostDir,
+            PluginInstruction::WebServerStarted(..) => PluginContext::WebServerStarted,
+            PluginInstruction::FailedToStartWebServer(..) => PluginContext::FailedToStartWebServer,
         }
     }
 }
@@ -248,7 +254,7 @@ pub(crate) fn plugin_thread_main(
         engine,
         plugin_dir,
         path_to_default_shell,
-        zellij_cwd,
+        zellij_cwd.clone(),
         capabilities,
         client_attributes,
         default_shell,
@@ -282,12 +288,19 @@ pub(crate) fn plugin_thread_main(
                 client_id,
                 size,
                 cwd,
+                focused_plugin_id,
                 skip_cache,
                 should_focus_plugin,
                 floating_pane_coordinates,
             ) => {
                 run_plugin_or_alias.populate_run_plugin_if_needed(&plugin_aliases);
-                let cwd = run_plugin_or_alias.get_initial_cwd().or(cwd);
+                let cwd = run_plugin_or_alias.get_initial_cwd().or(cwd).or_else(|| {
+                    if let Some(plugin_id) = focused_plugin_id {
+                        wasm_bridge.get_plugin_cwd(plugin_id, client_id)
+                    } else {
+                        None
+                    }
+                });
                 let run_plugin = run_plugin_or_alias.get_run_plugin();
                 let start_suppressed = false;
                 match wasm_bridge.load_plugin(
@@ -308,11 +321,16 @@ pub(crate) fn plugin_thread_main(
                             tab_index,
                             plugin_id,
                             pane_id_to_replace,
-                            cwd,
+                            cwd.clone(),
                             start_suppressed,
                             floating_pane_coordinates,
                             should_focus_plugin,
                             Some(client_id),
+                        )));
+
+                        drop(bus.senders.send_to_pty(PtyInstruction::ReportPluginCwd(
+                            plugin_id,
+                            cwd.unwrap_or_else(|| zellij_cwd.clone()),
                         )));
                     },
                     Err(e) => {
@@ -424,7 +442,7 @@ pub(crate) fn plugin_thread_main(
                 mut floating_panes_layout,
                 tab_index,
                 should_change_focus_to_new_tab,
-                client_id,
+                (client_id, is_web_client),
             ) => {
                 // prefer connected clients so as to avoid opening plugins in the background for
                 // CLI clients unless no-one else is connected
@@ -496,7 +514,7 @@ pub(crate) fn plugin_thread_main(
                     tab_index,
                     plugin_ids,
                     should_change_focus_to_new_tab,
-                    client_id,
+                    (client_id, is_web_client),
                 )));
             },
             PluginInstruction::ApplyCachedEvents {
@@ -697,6 +715,7 @@ pub(crate) fn plugin_thread_main(
                             &mut wasm_bridge,
                             &plugin_aliases,
                             floating_pane_coordinates,
+                            None,
                         );
                     },
                     None => {
@@ -759,6 +778,7 @@ pub(crate) fn plugin_thread_main(
                                 &mut wasm_bridge,
                                 &plugin_aliases,
                                 floating_pane_coordinates,
+                                None,
                             );
                         },
                         None => {
@@ -824,6 +844,7 @@ pub(crate) fn plugin_thread_main(
                             &mut wasm_bridge,
                             &plugin_aliases,
                             floating_pane_coordinates,
+                            message.new_plugin_args.and_then(|n| n.should_focus),
                         );
                     },
                     (None, Some(destination_plugin_id)) => {
@@ -911,8 +932,33 @@ pub(crate) fn plugin_thread_main(
                 wasm_bridge.start_fs_watcher_if_not_started();
             },
             PluginInstruction::ChangePluginHostDir(new_host_folder, plugin_id, client_id) => {
+                if let Ok(_) = wasm_bridge.change_plugin_host_dir(
+                    new_host_folder.clone(),
+                    plugin_id,
+                    client_id,
+                ) {
+                    drop(
+                        bus.senders.send_to_pty(PtyInstruction::ReportPluginCwd(
+                            plugin_id,
+                            new_host_folder,
+                        )),
+                    );
+                }
+            },
+            PluginInstruction::WebServerStarted(base_url) => {
+                let updates = vec![(
+                    None,
+                    None,
+                    Event::WebServerStatus(WebServerStatus::Online(base_url)),
+                )];
                 wasm_bridge
-                    .change_plugin_host_dir(new_host_folder, plugin_id, client_id)
+                    .update_plugins(updates, shutdown_send.clone())
+                    .non_fatal();
+            },
+            PluginInstruction::FailedToStartWebServer(error) => {
+                let updates = vec![(None, None, Event::FailedToStartWebServer(error))];
+                wasm_bridge
+                    .update_plugins(updates, shutdown_send.clone())
                     .non_fatal();
             },
             PluginInstruction::Exit => {
@@ -1004,6 +1050,7 @@ fn pipe_to_specific_plugins(
     wasm_bridge: &mut WasmBridge,
     plugin_aliases: &PluginAliases,
     floating_pane_coordinates: Option<FloatingPaneCoordinates>,
+    should_focus: Option<bool>,
 ) {
     let is_private = true;
     let size = Size::default();
@@ -1026,6 +1073,7 @@ fn pipe_to_specific_plugins(
                 pane_id_to_replace.clone(),
                 cli_client_id,
                 floating_pane_coordinates,
+                should_focus.unwrap_or(false),
             );
             for (plugin_id, client_id) in all_plugin_ids {
                 pipe_messages.push((

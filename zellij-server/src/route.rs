@@ -6,7 +6,7 @@ use crate::{
     os_input_output::ServerOsApi,
     panes::PaneId,
     plugins::PluginInstruction,
-    pty::{ClientTabIndexOrPaneId, PtyInstruction},
+    pty::{ClientTabIndexOrPaneId, NewPanePlacement, PtyInstruction},
     screen::ScreenInstruction,
     ServerInstruction, SessionMetaData, SessionState,
 };
@@ -257,30 +257,17 @@ pub(crate) fn route_action(
         },
         Action::NewPane(direction, name, start_suppressed) => {
             let shell = default_shell.clone();
-            let pty_instr = match direction {
-                Some(Direction::Left) => {
-                    PtyInstruction::SpawnTerminalVertically(shell, name, client_id)
-                },
-                Some(Direction::Right) => {
-                    PtyInstruction::SpawnTerminalVertically(shell, name, client_id)
-                },
-                Some(Direction::Up) => {
-                    PtyInstruction::SpawnTerminalHorizontally(shell, name, client_id)
-                },
-                Some(Direction::Down) => {
-                    PtyInstruction::SpawnTerminalHorizontally(shell, name, client_id)
-                },
-                // No direction specified - try to put it in the biggest available spot
-                None => PtyInstruction::SpawnTerminal(
-                    shell,
-                    None,
-                    name,
-                    None,
-                    start_suppressed,
-                    ClientTabIndexOrPaneId::ClientId(client_id),
-                ),
+            let new_pane_placement = match direction {
+                Some(direction) => NewPanePlacement::Tiled(Some(direction)),
+                None => NewPanePlacement::NoPreference,
             };
-            senders.send_to_pty(pty_instr).with_context(err_context)?;
+            let _ = senders.send_to_pty(PtyInstruction::SpawnTerminal(
+                shell,
+                name,
+                new_pane_placement,
+                start_suppressed,
+                ClientTabIndexOrPaneId::ClientId(client_id),
+            ));
         },
         Action::EditFile(
             open_file_payload,
@@ -292,25 +279,8 @@ pub(crate) fn route_action(
         ) => {
             let title = format!("Editing: {}", open_file_payload.path.display());
             let open_file = TerminalAction::OpenFile(open_file_payload);
-            let pty_instr = match (split_direction, should_float, should_open_in_place) {
-                (Some(Direction::Left), false, false) => {
-                    PtyInstruction::SpawnTerminalVertically(Some(open_file), Some(title), client_id)
-                },
-                (Some(Direction::Right), false, false) => {
-                    PtyInstruction::SpawnTerminalVertically(Some(open_file), Some(title), client_id)
-                },
-                (Some(Direction::Up), false, false) => PtyInstruction::SpawnTerminalHorizontally(
-                    Some(open_file),
-                    Some(title),
-                    client_id,
-                ),
-                (Some(Direction::Down), false, false) => PtyInstruction::SpawnTerminalHorizontally(
-                    Some(open_file),
-                    Some(title),
-                    client_id,
-                ),
-                // open terminal in place
-                (_, _, true) => match pane_id {
+            let pty_instr = if should_open_in_place {
+                match pane_id {
                     Some(pane_id) => PtyInstruction::SpawnInPlaceTerminal(
                         Some(open_file),
                         Some(title),
@@ -323,17 +293,19 @@ pub(crate) fn route_action(
                         false,
                         ClientTabIndexOrPaneId::ClientId(client_id),
                     ),
-                },
-                // Open either floating terminal if we were asked with should_float or defer
-                // placement to screen
-                (None, _, _) | (_, true, _) => PtyInstruction::SpawnTerminal(
+                }
+            } else {
+                PtyInstruction::SpawnTerminal(
                     Some(open_file),
-                    Some(should_float),
                     Some(title),
-                    floating_pane_coordinates,
+                    if should_float {
+                        NewPanePlacement::Floating(floating_pane_coordinates)
+                    } else {
+                        NewPanePlacement::Tiled(split_direction)
+                    },
                     start_suppressed,
                     ClientTabIndexOrPaneId::ClientId(client_id),
-                ),
+                )
             };
             senders.send_to_pty(pty_instr).with_context(err_context)?;
         },
@@ -368,16 +340,14 @@ pub(crate) fn route_action(
                 .with_context(err_context)?;
         },
         Action::NewFloatingPane(run_command, name, floating_pane_coordinates) => {
-            let should_float = true;
             let run_cmd = run_command
                 .map(|cmd| TerminalAction::RunCommand(cmd.into()))
                 .or_else(|| default_shell.clone());
             senders
                 .send_to_pty(PtyInstruction::SpawnTerminal(
                     run_cmd,
-                    Some(should_float),
                     name,
-                    floating_pane_coordinates,
+                    NewPanePlacement::Floating(floating_pane_coordinates),
                     false,
                     ClientTabIndexOrPaneId::ClientId(client_id),
                 ))
@@ -410,35 +380,46 @@ pub(crate) fn route_action(
                 },
             }
         },
-        Action::NewTiledPane(direction, run_command, name) => {
-            let should_float = false;
+        Action::NewStackedPane(run_command, name) => {
             let run_cmd = run_command
                 .map(|cmd| TerminalAction::RunCommand(cmd.into()))
                 .or_else(|| default_shell.clone());
-            let pty_instr = match direction {
-                Some(Direction::Left) => {
-                    PtyInstruction::SpawnTerminalVertically(run_cmd, name, client_id)
+            match pane_id {
+                Some(pane_id) => {
+                    senders
+                        .send_to_pty(PtyInstruction::SpawnTerminal(
+                            run_cmd,
+                            name,
+                            NewPanePlacement::Stacked(Some(pane_id)),
+                            false,
+                            ClientTabIndexOrPaneId::PaneId(pane_id),
+                        ))
+                        .with_context(err_context)?;
                 },
-                Some(Direction::Right) => {
-                    PtyInstruction::SpawnTerminalVertically(run_cmd, name, client_id)
+                None => {
+                    senders
+                        .send_to_pty(PtyInstruction::SpawnTerminal(
+                            run_cmd,
+                            name,
+                            NewPanePlacement::Stacked(None),
+                            false,
+                            ClientTabIndexOrPaneId::ClientId(client_id),
+                        ))
+                        .with_context(err_context)?;
                 },
-                Some(Direction::Up) => {
-                    PtyInstruction::SpawnTerminalHorizontally(run_cmd, name, client_id)
-                },
-                Some(Direction::Down) => {
-                    PtyInstruction::SpawnTerminalHorizontally(run_cmd, name, client_id)
-                },
-                // No direction specified - try to put it in the biggest available spot
-                None => PtyInstruction::SpawnTerminal(
-                    run_cmd,
-                    Some(should_float),
-                    name,
-                    None,
-                    false,
-                    ClientTabIndexOrPaneId::ClientId(client_id),
-                ),
-            };
-            senders.send_to_pty(pty_instr).with_context(err_context)?;
+            }
+        },
+        Action::NewTiledPane(direction, run_command, name) => {
+            let run_cmd = run_command
+                .map(|cmd| TerminalAction::RunCommand(cmd.into()))
+                .or_else(|| default_shell.clone());
+            let _ = senders.send_to_pty(PtyInstruction::SpawnTerminal(
+                run_cmd,
+                name,
+                NewPanePlacement::Tiled(direction),
+                false,
+                ClientTabIndexOrPaneId::ClientId(client_id),
+            ));
         },
         Action::TogglePaneEmbedOrFloating => {
             senders
@@ -465,30 +446,13 @@ pub(crate) fn route_action(
         },
         Action::Run(command) => {
             let run_cmd = Some(TerminalAction::RunCommand(command.clone().into()));
-            let pty_instr = match command.direction {
-                Some(Direction::Left) => {
-                    PtyInstruction::SpawnTerminalVertically(run_cmd, None, client_id)
-                },
-                Some(Direction::Right) => {
-                    PtyInstruction::SpawnTerminalVertically(run_cmd, None, client_id)
-                },
-                Some(Direction::Up) => {
-                    PtyInstruction::SpawnTerminalHorizontally(run_cmd, None, client_id)
-                },
-                Some(Direction::Down) => {
-                    PtyInstruction::SpawnTerminalHorizontally(run_cmd, None, client_id)
-                },
-                // No direction specified - try to put it in the biggest available spot
-                None => PtyInstruction::SpawnTerminal(
-                    run_cmd,
-                    None,
-                    None,
-                    None,
-                    false,
-                    ClientTabIndexOrPaneId::ClientId(client_id),
-                ),
-            };
-            senders.send_to_pty(pty_instr).with_context(err_context)?;
+            let _ = senders.send_to_pty(PtyInstruction::SpawnTerminal(
+                run_cmd,
+                None,
+                NewPanePlacement::Tiled(command.direction),
+                false,
+                ClientTabIndexOrPaneId::ClientId(client_id),
+            ));
         },
         Action::CloseFocus => {
             senders
@@ -502,22 +466,24 @@ pub(crate) fn route_action(
             swap_floating_layouts,
             tab_name,
             should_change_focus_to_new_tab,
+            cwd,
         ) => {
             let shell = default_shell.clone();
             let swap_tiled_layouts =
                 swap_tiled_layouts.unwrap_or_else(|| default_layout.swap_tiled_layouts.clone());
             let swap_floating_layouts = swap_floating_layouts
                 .unwrap_or_else(|| default_layout.swap_floating_layouts.clone());
+            let is_web_client = false; // actions cannot be initiated directly from the web
             senders
                 .send_to_screen(ScreenInstruction::NewTab(
-                    None,
+                    cwd,
                     shell,
                     tab_layout,
                     floating_panes_layout,
                     tab_name,
                     (swap_tiled_layouts, swap_floating_layouts),
                     should_change_focus_to_new_tab,
-                    client_id,
+                    (client_id, is_web_client),
                 ))
                 .with_context(err_context)?;
         },
@@ -1146,6 +1112,8 @@ pub(crate) fn route_thread_main(
                             layout,
                             plugin_aliases,
                             should_launch_setup_wizard,
+                            is_web_client,
+                            layout_is_welcome_screen,
                         ) => {
                             let new_client_instruction = ServerInstruction::NewClient(
                                 client_attributes,
@@ -1155,6 +1123,8 @@ pub(crate) fn route_thread_main(
                                 layout,
                                 plugin_aliases,
                                 should_launch_setup_wizard,
+                                is_web_client,
+                                layout_is_welcome_screen,
                                 client_id,
                             );
                             to_server
@@ -1167,18 +1137,37 @@ pub(crate) fn route_thread_main(
                             runtime_config_options,
                             tab_position_to_focus,
                             pane_id_to_focus,
+                            is_web_client,
                         ) => {
-                            let attach_client_instruction = ServerInstruction::AttachClient(
-                                client_attributes,
-                                config,
-                                runtime_config_options,
-                                tab_position_to_focus,
-                                pane_id_to_focus,
-                                client_id,
-                            );
-                            to_server
-                                .send(attach_client_instruction)
-                                .with_context(err_context)?;
+                            let allow_web_connections = rlocked_sessions
+                                .as_ref()
+                                .map(|rlocked_sessions| {
+                                    rlocked_sessions.web_sharing.web_clients_allowed()
+                                })
+                                .unwrap_or(false);
+                            let should_allow_connection = !is_web_client || allow_web_connections;
+                            if should_allow_connection {
+                                let attach_client_instruction = ServerInstruction::AttachClient(
+                                    client_attributes,
+                                    config,
+                                    runtime_config_options,
+                                    tab_position_to_focus,
+                                    pane_id_to_focus,
+                                    is_web_client,
+                                    client_id,
+                                );
+                                to_server
+                                    .send(attach_client_instruction)
+                                    .with_context(err_context)?;
+                            } else {
+                                let error = "This session does not allow web connections.";
+                                let _ = to_server.send(ServerInstruction::LogError(
+                                    vec![error.to_owned()],
+                                    client_id,
+                                ));
+                                let _ = to_server
+                                    .send(ServerInstruction::SendWebClientsForbidden(client_id));
+                            }
                         },
                         ClientToServerMsg::ClientExited => {
                             // we don't unwrap this because we don't really care if there's an error here (eg.
@@ -1208,6 +1197,13 @@ pub(crate) fn route_thread_main(
                                 client_id,
                                 failed_path,
                             ));
+                        },
+                        ClientToServerMsg::WebServerStarted(base_url) => {
+                            let _ = to_server.send(ServerInstruction::WebServerStarted(base_url));
+                        },
+                        ClientToServerMsg::FailedToStartWebServer(error) => {
+                            let _ =
+                                to_server.send(ServerInstruction::FailedToStartWebServer(error));
                         },
                     }
                     Ok(should_break)

@@ -37,7 +37,7 @@ pub struct FloatingPanes {
     display_area: Rc<RefCell<Size>>,
     viewport: Rc<RefCell<Viewport>>,
     connected_clients: Rc<RefCell<HashSet<ClientId>>>,
-    connected_clients_in_app: Rc<RefCell<HashSet<ClientId>>>,
+    connected_clients_in_app: Rc<RefCell<HashMap<ClientId, bool>>>, // bool -> is_web_client
     mode_info: Rc<RefCell<HashMap<ClientId, ModeInfo>>>,
     character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
     default_mode_info: ModeInfo,
@@ -49,6 +49,7 @@ pub struct FloatingPanes {
     show_panes: bool,
     pane_being_moved_with_mouse: Option<(PaneId, Position)>,
     senders: ThreadSenders,
+    window_title: Option<String>,
 }
 
 #[allow(clippy::borrowed_box)]
@@ -58,7 +59,7 @@ impl FloatingPanes {
         display_area: Rc<RefCell<Size>>,
         viewport: Rc<RefCell<Viewport>>,
         connected_clients: Rc<RefCell<HashSet<ClientId>>>,
-        connected_clients_in_app: Rc<RefCell<HashSet<ClientId>>>,
+        connected_clients_in_app: Rc<RefCell<HashMap<ClientId, bool>>>, // bool -> is_web_client
         mode_info: Rc<RefCell<HashMap<ClientId, ModeInfo>>>,
         character_cell_size: Rc<RefCell<Option<SizeInPixels>>>,
         session_is_mirrored: bool,
@@ -84,6 +85,7 @@ impl FloatingPanes {
             active_panes: ActivePanes::new(&os_input),
             pane_being_moved_with_mouse: None,
             senders,
+            window_title: None,
         }
     }
     pub fn stack(&self) -> Option<FloatingPanesStack> {
@@ -234,6 +236,7 @@ impl FloatingPanes {
             .or_else(|| self.panes.keys().next().copied())
     }
     pub fn toggle_show_panes(&mut self, should_show_floating_panes: bool) {
+        self.window_title = None; // clear so that it will be re-rendered once we toggle back
         self.show_panes = should_show_floating_panes;
         if should_show_floating_panes {
             self.active_panes.focus_all_panes(&mut self.panes);
@@ -438,6 +441,11 @@ impl FloatingPanes {
                         .render_pane_contents_for_client(*client_id)
                         .with_context(err_context)?;
                 }
+                pane_contents_and_ui.render_terminal_title_if_needed(
+                    *client_id,
+                    client_mode,
+                    &mut self.window_title,
+                );
                 // this is done for panes that don't have their own cursor (eg. panes of
                 // another user)
                 pane_contents_and_ui

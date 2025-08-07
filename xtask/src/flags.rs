@@ -28,6 +28,8 @@ xflags::xflags! {
             cmd cross {
                 /// Target-triple to compile the application for
                 required triple: OsString
+                /// Compile without web server support
+                optional --no-web
             }
         }
 
@@ -58,11 +60,15 @@ xflags::xflags! {
             optional -r, --release
             /// Clean project before building
             optional -c, --clean
+            /// Compile without web server support
+            optional --no-web
         }
 
         /// Generate a runnable `zellij` executable with plugins bundled
         cmd install {
             required destination: PathBuf
+            /// Compile without web server support
+            optional --no-web
         }
 
         /// Run debug version of zellij
@@ -75,6 +81,8 @@ xflags::xflags! {
             optional --singlepass
             /// Disable optimizing dependencies
             optional --disable-deps-optimize
+            /// Compile without web server support
+            optional --no-web
             /// Arguments to pass after `cargo run --`
             repeated args: OsString
         }
@@ -87,6 +95,8 @@ xflags::xflags! {
 
         /// Run application tests
         cmd test {
+            /// Compile without web server support
+            optional --no-web
             /// Arguments to pass after `cargo test --`
             repeated args: OsString
         }
@@ -99,6 +109,8 @@ xflags::xflags! {
             optional -p, --plugins-only
             /// Build everything except the plugins
             optional --no-plugins
+            /// Compile without web support
+            optional --no-web
         }
     }
 }
@@ -153,6 +165,7 @@ pub struct E2e {
 #[derive(Debug)]
 pub struct Cross {
     pub triple: OsString,
+    pub no_web: bool,
 }
 
 #[derive(Debug)]
@@ -176,11 +189,13 @@ pub struct Clippy;
 pub struct Make {
     pub release: bool,
     pub clean: bool,
+    pub no_web: bool,
 }
 
 #[derive(Debug)]
 pub struct Install {
     pub destination: PathBuf,
+    pub no_web: bool,
 }
 
 #[derive(Debug)]
@@ -191,6 +206,7 @@ pub struct Run {
     pub data_dir: Option<PathBuf>,
     pub singlepass: bool,
     pub disable_deps_optimize: bool,
+    pub no_web: bool,
 }
 
 #[derive(Debug)]
@@ -201,6 +217,7 @@ pub struct Format {
 #[derive(Debug)]
 pub struct Test {
     pub args: Vec<OsString>,
+    pub no_web: bool,
 }
 
 #[derive(Debug)]
@@ -208,6 +225,7 @@ pub struct Build {
     pub release: bool,
     pub plugins_only: bool,
     pub no_plugins: bool,
+    pub no_web: bool,
 }
 
 impl Xtask {
@@ -226,4 +244,3 @@ impl Xtask {
         Self::from_vec_(args)
     }
 }
-// generated end

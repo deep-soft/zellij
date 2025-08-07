@@ -31,6 +31,7 @@ keybinds clear-defaults=true {{
         bind "n" {{ NewPane; SwitchToMode "Locked"; }}
         bind "d" {{ NewPane "Down"; SwitchToMode "Locked"; }}
         bind "r" {{ NewPane "Right"; SwitchToMode "Locked"; }}
+        bind "s" {{ NewPane "stacked"; SwitchToMode "Locked"; }}
         bind "x" {{ CloseFocus; SwitchToMode "Locked"; }}
         bind "f" {{ ToggleFocusFullscreen; SwitchToMode "Locked"; }}
         bind "z" {{ TogglePaneFrames; SwitchToMode "Locked"; }}
@@ -147,6 +148,13 @@ keybinds clear-defaults=true {{
             }};
             SwitchToMode "Locked"
         }}
+        bind "s" {{
+            LaunchOrFocusPlugin "zellij:share" {{
+                floating true
+                move_to_focused_tab true
+            }};
+            SwitchToMode "Locked"
+        }}
     }}
     shared_except "locked" "renametab" "renamepane" {{
         bind "{primary_modifier} g" {{ SwitchToMode "Locked"; }}
@@ -237,6 +245,7 @@ keybinds clear-defaults=true {{
         bind "n" {{ NewPane; SwitchToMode "Normal"; }}
         bind "d" {{ NewPane "Down"; SwitchToMode "Normal"; }}
         bind "r" {{ NewPane "Right"; SwitchToMode "Normal"; }}
+        bind "s" {{ NewPane "stacked"; SwitchToMode "Normal"; }}
         bind "x" {{ CloseFocus; SwitchToMode "Normal"; }}
         bind "f" {{ ToggleFocusFullscreen; SwitchToMode "Normal"; }}
         bind "z" {{ TogglePaneFrames; SwitchToMode "Normal"; }}
@@ -350,6 +359,13 @@ keybinds clear-defaults=true {{
         }}
         bind "a" {{
             LaunchOrFocusPlugin "zellij:about" {{
+                floating true
+                move_to_focused_tab true
+            }};
+            SwitchToMode "Normal"
+        }}
+        bind "s" {{
+            LaunchOrFocusPlugin "zellij:share" {{
                 floating true
                 move_to_focused_tab true
             }};
@@ -454,6 +470,7 @@ keybinds clear-defaults=true {{
         bind "n" {{ NewPane; SwitchToMode "Normal"; }}
         bind "d" {{ NewPane "Down"; SwitchToMode "Normal"; }}
         bind "r" {{ NewPane "Right"; SwitchToMode "Normal"; }}
+        bind "s" {{ NewPane "stacked"; SwitchToMode "Normal"; }}
         bind "x" {{ CloseFocus; SwitchToMode "Normal"; }}
         bind "f" {{ ToggleFocusFullscreen; SwitchToMode "Normal"; }}
         bind "z" {{ TogglePaneFrames; SwitchToMode "Normal"; }}
@@ -563,6 +580,13 @@ keybinds clear-defaults=true {{
             }};
             SwitchToMode "Normal"
         }}
+        bind "s" {{
+            LaunchOrFocusPlugin "zellij:share" {{
+                floating true
+                move_to_focused_tab true
+            }};
+            SwitchToMode "Normal"
+        }}
     }}
     tmux {{
         bind "[" {{ SwitchToMode "Scroll"; }}
@@ -642,6 +666,7 @@ keybinds clear-defaults=true {{
         bind "n" {{ NewPane; SwitchToMode "Normal"; }}
         bind "d" {{ NewPane "Down"; SwitchToMode "Normal"; }}
         bind "r" {{ NewPane "Right"; SwitchToMode "Normal"; }}
+        bind "s" {{ NewPane "stacked"; SwitchToMode "Normal"; }}
         bind "x" {{ CloseFocus; SwitchToMode "Normal"; }}
         bind "f" {{ ToggleFocusFullscreen; SwitchToMode "Normal"; }}
         bind "z" {{ TogglePaneFrames; SwitchToMode "Normal"; }}
@@ -752,6 +777,13 @@ keybinds clear-defaults=true {{
             }};
             SwitchToMode "Normal"
         }}
+        bind "s" {{
+            LaunchOrFocusPlugin "zellij:share" {{
+                floating true
+                move_to_focused_tab true
+            }};
+            SwitchToMode "Normal"
+        }}
     }}
     tmux {{
         bind "[" {{ SwitchToMode "Scroll"; }}
@@ -837,6 +869,7 @@ keybinds clear-defaults=true {{
         bind "n" {{ NewPane; SwitchToMode "Normal"; }}
         bind "d" {{ NewPane "Down"; SwitchToMode "Normal"; }}
         bind "r" {{ NewPane "Right"; SwitchToMode "Normal"; }}
+        bind "s" {{ NewPane "stacked"; SwitchToMode "Normal"; }}
         bind "x" {{ CloseFocus; SwitchToMode "Normal"; }}
         bind "f" {{ ToggleFocusFullscreen; SwitchToMode "Normal"; }}
         bind "z" {{ TogglePaneFrames; SwitchToMode "Normal"; }}
@@ -941,6 +974,13 @@ keybinds clear-defaults=true {{
             }};
             SwitchToMode "Normal"
         }}
+        bind "s" {{
+            LaunchOrFocusPlugin "zellij:share" {{
+                floating true
+                move_to_focused_tab true
+            }};
+            SwitchToMode "Normal"
+        }}
     }}
     tmux {{
         bind "[" {{ SwitchToMode "Scroll"; }}
@@ -1007,6 +1047,7 @@ keybinds clear-defaults=true {{
         bind "n" {{ NewPane; SwitchToMode "Normal"; }}
         bind "d" {{ NewPane "Down"; SwitchToMode "Normal"; }}
         bind "r" {{ NewPane "Right"; SwitchToMode "Normal"; }}
+        bind "s" {{ NewPane "stacked"; SwitchToMode "Normal"; }}
         bind "x" {{ CloseFocus; SwitchToMode "Normal"; }}
         bind "f" {{ ToggleFocusFullscreen; SwitchToMode "Normal"; }}
         bind "z" {{ TogglePaneFrames; SwitchToMode "Normal"; }}
@@ -1120,6 +1161,13 @@ keybinds clear-defaults=true {{
         }}
         bind "a" {{
             LaunchOrFocusPlugin "zellij:about" {{
+                floating true
+                move_to_focused_tab true
+            }};
+            SwitchToMode "Normal"
+        }}
+        bind "s" {{
+            LaunchOrFocusPlugin "zellij:share" {{
                 floating true
                 move_to_focused_tab true
             }};
