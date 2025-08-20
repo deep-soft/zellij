@@ -5,7 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
+* fix: meta key handling in web client (https://github.com/zellij-org/zellij/pull/4376)
+
+## [0.43.1] - 2025-08-08
 * fix: pane rename backspace regression (https://github.com/zellij-org/zellij/pull/4346)
+* fix: Zellij Web login issue with safari (https://github.com/zellij-org/zellij/pull/4345)
+* fix: terminal title regression (https://github.com/zellij-org/zellij/pull/4352)
+* fix: resurrection listing regression (https://github.com/zellij-org/zellij/pull/4354)
+* fix: tooltip keybinding backgrounds (https://github.com/zellij-org/zellij/pull/4356)
+* fix: default to session name for window/tab title in Zellij Web (https://github.com/zellij-org/zellij/pull/4357)
+* fix: handle omitted flags in the push sequence of the KKP (https://github.com/zellij-org/zellij/pull/4334)
 
 ## [0.43.0] - 2025-08-05
 * feat: multiple select and bulk pane actions (https://github.com/zellij-org/zellij/pull/4169 and https://github.com/zellij-org/zellij/pull/4171, https://github.com/zellij-org/zellij/pull/4221 and https://github.com/zellij-org/zellij/pull/4286)
