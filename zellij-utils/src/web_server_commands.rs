@@ -1,10 +1,11 @@
 use crate::consts::WEBSERVER_SOCKET_PATH;
 use crate::errors::prelude::*;
-use crate::input::config::Config;
+use crate::web_server_contract::web_server_contract::InstructionForWebServer as ProtoInstructionForWebServer;
 use interprocess::local_socket::LocalSocketStream;
+use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{self, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::os::unix::fs::FileTypeExt;
 
 pub fn shutdown_all_webserver_instances() -> Result<()> {
@@ -41,7 +42,6 @@ pub fn shutdown_all_webserver_instances() -> Result<()> {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum InstructionForWebServer {
     ShutdownWebServer,
-    ConfigWrittenToDisk(Config),
 }
 
 pub fn create_webserver_sender(path: &str) -> Result<BufWriter<LocalSocketStream>> {
@@ -53,8 +53,15 @@ pub fn send_webserver_instruction(
     sender: &mut BufWriter<LocalSocketStream>,
     instruction: InstructionForWebServer,
 ) -> Result<()> {
-    rmp_serde::encode::write(sender, &instruction)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    // Convert to protobuf and send with length prefix
+    let proto_instruction: ProtoInstructionForWebServer = instruction.into();
+    let encoded = proto_instruction.encode_to_vec();
+    let len = encoded.len() as u32;
+
+    // Write length prefix
+    sender.write_all(&len.to_le_bytes())?;
+    // Write protobuf message
+    sender.write_all(&encoded)?;
     sender.flush()?;
     Ok(())
 }

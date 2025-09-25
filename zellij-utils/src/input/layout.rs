@@ -237,7 +237,7 @@ pub enum Run {
     Plugin(RunPluginOrAlias),
     #[serde(rename = "command")]
     Command(RunCommand),
-    EditFile(PathBuf, Option<usize>, Option<PathBuf>), // TODO: merge this with TerminalAction::OpenFile
+    EditFile(PathBuf, Option<usize>, Option<PathBuf>),
     Cwd(PathBuf),
 }
 
@@ -1248,6 +1248,50 @@ impl Layout {
         }
         layout
     }
+    pub fn from_layout_info_with_config(
+        layout_dir: &Option<PathBuf>,
+        layout_info: &LayoutInfo,
+        config: Option<Config>,
+    ) -> Result<(Layout, Config), ConfigError> {
+        let mut should_start_layout_commands_suspended = false;
+        let (path_to_raw_layout, raw_layout, raw_swap_layouts) = match layout_info {
+            LayoutInfo::File(layout_name_without_extension) => {
+                let layout_dir = layout_dir.clone().or_else(|| default_layout_dir());
+                let (path_to_layout, stringified_layout, swap_layouts) =
+                    Self::stringified_from_dir(
+                        &PathBuf::from(layout_name_without_extension),
+                        layout_dir.as_ref(),
+                    )?;
+                (Some(path_to_layout), stringified_layout, swap_layouts)
+            },
+            LayoutInfo::BuiltIn(layout_name) => {
+                let (path_to_layout, stringified_layout, swap_layouts) =
+                    Self::stringified_from_default_assets(&PathBuf::from(layout_name))?;
+                (Some(path_to_layout), stringified_layout, swap_layouts)
+            },
+            LayoutInfo::Url(url) => {
+                should_start_layout_commands_suspended = true;
+                (Some(url.clone()), Self::stringified_from_url(&url)?, None)
+            },
+            LayoutInfo::Stringified(stringified_layout) => (None, stringified_layout.clone(), None),
+        };
+        let mut layout = Layout::from_kdl(
+            &raw_layout,
+            path_to_raw_layout,
+            raw_swap_layouts
+                .as_ref()
+                .map(|(r, f)| (r.as_str(), f.as_str())),
+            None,
+        );
+        if should_start_layout_commands_suspended {
+            layout
+                .iter_mut()
+                .next()
+                .map(|l| l.recursively_add_start_suspended_including_template(Some(true)));
+        }
+        let config = Config::from_kdl(&raw_layout, config)?; // this merges the two config, with
+        layout.map(|l| (l, config))
+    }
     pub fn stringified_from_path_or_default(
         layout_path: Option<&PathBuf>,
         layout_dir: Option<PathBuf>,
@@ -1368,6 +1412,20 @@ impl Layout {
         )?;
         let config = Config::from_kdl(&raw_layout, Some(config))?; // this merges the two config, with
         Ok((layout, config))
+    }
+    pub fn default_layout_asset() -> Layout {
+        Layout::from_kdl(
+            &Self::stringified_default_from_assets().unwrap(),
+            None,
+            Some((
+                "",
+                Self::stringified_default_swap_from_assets()
+                    .unwrap()
+                    .as_str(),
+            )),
+            None,
+        )
+        .unwrap()
     }
     pub fn from_str(
         raw: &str,
@@ -1596,6 +1654,21 @@ impl Layout {
                     .run
                     .as_mut()
                     .map(|f| f.populate_run_plugin_if_needed(&plugin_aliases));
+            }
+        }
+        for swap_tiled_layout in &mut self.swap_tiled_layouts {
+            for (_constraint, tiled_pane_layout) in &mut swap_tiled_layout.0 {
+                tiled_pane_layout.populate_plugin_aliases_in_layout(plugin_aliases);
+            }
+        }
+        for swap_floating_layout in &mut self.swap_floating_layouts {
+            for (_constraint, floating_pane_layouts) in &mut swap_floating_layout.0 {
+                for floating_pane_layout in floating_pane_layouts {
+                    floating_pane_layout
+                        .run
+                        .as_mut()
+                        .map(|f| f.populate_run_plugin_if_needed(plugin_aliases));
+                }
             }
         }
     }
